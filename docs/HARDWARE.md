@@ -176,11 +176,60 @@ device will bounce straight back out of deep sleep.
 
 | Function | GPIO |
 |---|---|
-| I²C SDA / SCL (MAX77972 charger/fuel-gauge) | 8 / 9 |
+| I²C SDA / SCL (MAX77972 charger/fuel-gauge) | 8 / **18** — see below, 9 was probably wrong |
 | Charge-enable | 44 |
 | USB detect | 42 (active low) |
 | USB D- / D+ | 19 / 20 |
 | Boot strapping | 0 |
+
+## MAX77972 charger / fuel gauge
+
+### The SCL pin was probably recorded wrong
+
+This doc previously said I²C was GPIO **8 / 9**. Stock's `wl_io::init` calls
+`Wire.begin(8, 18, 100000)` — SDA 8, **SCL 18**, 100 kHz. GPIO 8/9 happens to be the
+arduino-esp32 *default* I²C pair for the ESP32-S3, i.e. exactly what you'd write down if you
+assumed rather than measured, and stock explicitly overrides it. Neither 9 nor 18 is configured
+for anything else anywhere in the vendor image.
+
+SCL is an **output**, and the doc and the firmware disagree, so the firmware doesn't pick: it
+probes address `0x36` with SCL=18, and on no-ACK returns both pads to inputs and retries with
+SCL=9. An address-only probe cannot alter a register, which is what makes trying a disputed
+output pin safe. On first flash the boot log says which one answered — that settles it.
+
+### Registers
+
+Two addresses, selected by register number: **`0x36`** for registers ≤ `0xFF` (live values) and
+**`0x37`** above (nonvolatile config). Values are 16-bit **LSB-first**. Everything LibreMicro
+does is a read from bank 0; nothing writes a register, and nothing touches charge-enable
+(GPIO 44) — mis-driving a charger is a real hazard.
+
+| Reg | Meaning | Scale |
+|---|---|---|
+| `0x07` | RepSOC — reported state of charge | 1/256 % |
+| `0x1A` | VCell | 78.125 µV |
+| `0x0D7` | Charger details; bits 11:8 are `chg_dtls` | — |
+| `0x0FF` | VFSOC | `>> 8` = integer % |
+| `0x00` | Status (bit 1 = POR) | — |
+
+Percentage is `(RepSOC + 128) >> 8`. Charging is `chg_dtls <= 2`, which stock's own
+`is_charging()` agrees with exactly — those three values are prequal/trickle, fast-charge CC, and
+fast-charge CV/top-off. Note `chg_dtls == 8` is *charge done*, so a full battery on the cable
+correctly reports **not** charging.
+
+The scale factors are what identify these registers rather than any guess: 0.5 mAh and
+0.15625 mA per LSB (both implying a 10 mΩ sense resistor), 1/256 °C, 78.125 µV. That's textbook
+ModelGauge m5, and the surrounding map matches it. It is **not** MAX17055's map — RepCap/RepSOC
+sit at `0x06`/`0x07` and VCell/Temp/Current at `0x1A`/`0x1B`/`0x1C`, one address up, in the
+MAX1733x family style.
+
+Also recovered from stock's 42-register bulk read, unused so far but worth not re-deriving:
+`0x06` RepCap and `0x10`/`0x23` FullCapRep/Nom (0.5 mAh), `0x17` Cycles (÷100), `0x19` AvgVCell,
+`0x1B` Temp and `0x34` DieTemp (int16, 1/256 °C), `0x1C`/`0x1D` Current/AvgCurrent (int16,
+0.15625 mA), `0x29` IChgTerm, `0x2A` charge-voltage target, and flag registers `0x26`–`0x28`,
+`0x3A`, `0x3C`–`0x3F`, `0x4D`, `0x51`, `0x52`, `0xB0`, `0xD1`, `0xD3`, `0xD4`, `0xD6`–`0xD8`.
+Bank 1 holds nonvolatile charge/JEITA config at `0x1C4`, `0x1C5`, `0x1CA`, `0x1CC`–`0x1CF`,
+`0x1D1`, `0x1D5` — deliberately untouched.
 
 ## Flash layout (vendor partition table, kept intact)
 

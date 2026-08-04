@@ -45,14 +45,16 @@
 //   dump                              print inherited/live hold+GPIO register state
 //   mscan                             print the RAW live matrix bitmap       (v2)
 //   ver                               report protocol/feature support        (v2)
+//   batt                              report the current battery reading     (v2)
 // Each command replies with a line starting "ok" or "err".
 //
 // Device -> host event lines (v2). These NEVER start with "ok" or "err", so the
 // host can demultiplex acks from events on the one shared link by line prefix:
 //   key <logical 0-12> down | key <logical 0-12> up
 //   enc cw | enc ccw | enc press | enc release      (guarded, see below)
-//   touch                                            (guarded, see below)
-//   rear                                             (guarded, see below)
+//   touch down | touch up                            (guarded, see below)
+//   rear down | rear up                              (guarded, see below)
+//   batt <percent> <0|1>                             (guarded, see below)
 // Diagnostic notices are emitted as "# ..." lines, which the host ignores.
 
 #include <stdio.h>
@@ -68,6 +70,7 @@
 #include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
+#include "driver/i2c_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "driver/ledc.h"
@@ -197,6 +200,102 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 #define LM_AUX_POLL_MS  2    // poll period for the guarded inputs
 #define LM_AUX_TAP_MS   150  // min gap between touch/rear reports, anti-chatter
 
+// ===========================================================================
+// BATTERY — MAX77972 charger + ModelGauge-m5 fuel gauge over I2C. READ ONLY.
+// ===========================================================================
+//
+// Everything below was decoded out of the vendor v0.6.1 image (the same method
+// docs/PIN-VERIFICATION.md describes). The MAX77972 has no public datasheet, so
+// stock firmware IS the datasheet here. What was recovered:
+//
+//   * The bus. wl_io::init (0x4200936c) calls Arduino Wire.begin(sda, scl, hz)
+//     with the literals sda=8, scl=18, hz=100000 (the frequency is the literal
+//     0x186a0 at 0x4200088c). TwoWire::begin(this, sdaPin, sclPin, frequency)
+//     is confirmed by following it to i2cInit(num, this[17], this[18], freq).
+//
+//     *** THE ONE DISAGREEMENT WITH docs/HARDWARE.md ***  That doc lists I2C as
+//     GPIO 8/9. 8 matches; SCL does NOT. GPIO 8/9 happens to be the arduino-esp32
+//     *default* I2C pair for the ESP32-S3, which is exactly what you would write
+//     down if you assumed rather than measured -- and stock explicitly overrides
+//     the default with 18 while leaving SDA at 8. GPIO 18 is also not configured
+//     for anything else anywhere in the vendor image (PIN-VERIFICATION.md's
+//     exhaustive gpio_config inventory), and neither is GPIO 9. So the vendor
+//     image says 18, and this file believes the vendor image -- but because SCL
+//     is an *output* and the doc disagrees, batt_init() PROBES: it brings the bus
+//     up on SCL=18, asks the gauge to ACK, and if it doesn't, tears the bus down
+//     and retries on SCL=9. Whichever ACKs wins, and `batt` / the boot notice
+//     report which one, so one flash settles the question for the doc.
+//
+//   * Two addresses, one register space. The register accessors (read-modify-write
+//     at 0x420cbe14, the 42-register bulk read at 0x420cbe70) both compute the
+//     slave address the same way: `addr = (reg > 0xFF) ? 0x37 : 0x36`. So bank 0
+//     (regs 0x000-0x0FF, the live gauge/charger registers) lives at 7-bit 0x36 and
+//     bank 1 (regs 0x100-0x1FF, the nonvolatile config block) at 0x37. We only
+//     ever touch bank 0, and only ever read.
+//
+//   * 16-bit registers, LSB first. The transport (0x42049b54) does
+//     beginTransmission(addr); write(reg); endTransmission(false); requestFrom(addr,2)
+//     then assembles `(second << 8) | first`.
+//
+//   * The scale factors, which are what actually identify the registers. Stock's
+//     own accessors apply: 78.125 uV/LSB to reg 0x1A (-> vcell), 0.15625 mA/LSB to
+//     int16 reg 0x1C (-> current), 1/256 %/LSB to reg 0x07 (-> "soc"), 1/256 degC
+//     to int16 reg 0x1B/0x34, 0.5 mAh/LSB to regs 0x06/0x10/0x23, and (reg 0xFF >> 8)
+//     for an integer percent. Those are textbook ModelGauge m5 units (0.5 mAh and
+//     0.15625 mA both imply a 10 mOhm sense resistor), and the surrounding map
+//     agrees with m5 too: 0x10 FullCapRep, 0x23 FullCapNom, 0x17 Cycles, 0x34
+//     DieTemp, 0xFF VFSOC, 0x00 Status with POR in bit 1. That cross-check is why
+//     the addresses below are read as decoded facts rather than guesses.
+//
+//   * Charging. Stock's is_charging() (0x420cbab0) returns true exactly when its
+//     charge-state enum is prequal_trickle / fast_charge_cc / fast_charge_cv_or_topoff,
+//     and its state decoder (0x420cc28c) produces those three from
+//     `chg_dtls = (reg 0xD7 >> 8) & 0x0F` values 0, 1 and 2 respectively. Two
+//     independent code paths, one conclusion: charging == chg_dtls <= 2.
+//     Note chg_dtls 8 + a bit in reg 0x3A is stock's "charge_done" -- FULL, which
+//     is deliberately NOT charging, matching what a host wants to show.
+//
+// WHAT THIS BLOCK WILL NEVER DO:
+//   - write any MAX77972 register (not one, not ever -- see the flag note below);
+//   - touch GPIO 44, the charge-enable. Mis-driving a charger is a real hazard and
+//     nothing here needs it;
+//   - report a percentage it did not actually read. Every failure path reports
+//     "unknown", never a number;
+//   - take the LEDs or the key matrix down with it. A sulking fuel gauge must not
+//     stop a macropad lighting up.
+//
+// Default ON. Unlike the encoder/touch/rear block above, the register semantics
+// here are not assumptions -- they are stock's own scale factors and stock's own
+// charging predicate, cross-validated against the published ModelGauge m5 units.
+// The bus is driven read-only, and the one genuinely open question (SCL 18 vs 9)
+// is resolved at runtime by probing instead of by picking. Set to 0 to compile the
+// whole thing out; then `ver` reports batt=none and no I2C pin is ever configured.
+#ifndef LM_ENABLE_BATTERY
+#define LM_ENABLE_BATTERY 1
+#endif
+
+#define LM_I2C_SDA_GPIO   8       // vendor-attested, agrees with docs/HARDWARE.md
+#define LM_I2C_SCL_GPIO   18      // vendor-attested; docs/HARDWARE.md says 9
+#define LM_I2C_SCL_ALT    9       // the doc's value, tried second if 18 won't ACK
+#define LM_I2C_HZ         100000  // stock's Wire.begin frequency literal
+
+#define LM_FG_ADDR        0x36    // bank 0: regs 0x00-0xFF (bank 1 = 0x37, unused)
+
+// Bank-0 registers, all 16-bit little-endian. Only these five are ever read.
+#define LM_REG_STATUS       0x00  // m5 Status; bit 1 = POR
+#define LM_REG_REPSOC       0x07  // reported state of charge, 1/256 % per LSB
+#define LM_REG_VCELL        0x1A  // cell voltage, 78.125 uV per LSB
+#define LM_REG_CHG_DETAILS  0xD7  // charger details; bits 11:8 = chg_dtls
+#define LM_REG_VFSOC        0xFF  // voltage-based SOC, 1/256 % per LSB
+
+// Sanity window on VCELL. A 1S Li-ion outside this is not a battery we can
+// believe, so we report unknown rather than a percentage derived from noise.
+#define LM_BATT_MV_MIN    2000
+#define LM_BATT_MV_MAX    5000
+
+#define LM_BATT_POLL_MS   15000   // a battery, not a sensor
+#define LM_BATT_FAILS_MAX 3       // consecutive read failures before "unknown"
+
 // Top-board power-rail enables (GPIO36 = addressable-LED VDD enable).
 #define RAIL_36    36
 #define RAIL_37    37
@@ -276,8 +375,15 @@ static void release_holds(void)
     // hold on a row pad would make gpio_set_level silently do nothing and the
     // matrix would read as permanently idle — the exact same failure mode that
     // kept the LED rail dark, just on a different pin. Release them too.
+    //
+    // The battery block adds the I2C pads (SDA 8, SCL 18 or 9). A latched hold on
+    // SDA or SCL would leave the line stuck and every transaction would time out --
+    // same failure mode again, third pin group. Note 44 is RELEASED here and never
+    // driven anywhere in this firmware; releasing a hold is not the same as taking
+    // control of the charger.
     const gpio_num_t dig[] = {6, 7, 36, 37, 38, 44,
-                              46, 17, 40, 47, 13, 5, 21, 1};
+                              46, 17, 40, 47, 13, 5, 21, 1,
+                              8, 9, 18};
     for (size_t i = 0; i < sizeof(dig) / sizeof(dig[0]); i++) {
         gpio_hold_dis(dig[i]);
     }
@@ -633,7 +739,7 @@ static void mtx_scan_task(void *arg)
 //
 // Entirely inert unless LM_ENABLE_UNVERIFIED_INPUTS is 1. See the pin block near
 // the top of the file for why. Emits, per docs/PROTOCOL.md:
-//   enc cw | enc ccw | enc press | enc release | touch | rear
+//   enc cw | enc ccw | enc press | enc release | touch down/up | rear down/up
 
 #if LM_ENABLE_UNVERIFIED_INPUTS
 
@@ -709,24 +815,34 @@ static void aux_task(void *arg)
             }
         }
 
-        // Touch and rear report a single edge each, which is what PROTOCOL.md's
-        // bare `touch` / `rear` lines mean (the host treats them as a tap).
+        // Touch and rear report BOTH edges as `touch down`/`touch up` (and likewise for
+        // rear), not a single bare line. A bare line carries no duration, so the host's
+        // recogniser could never fire a `hold` binding on these two controls — the tap had
+        // no measurable length. docs/PROTOCOL.md's `parse_device_line` accepts both
+        // spellings, so this costs nothing and makes hold work.
         uint8_t tv = (uint8_t)gpio_get_level(LM_PIN_TOUCH);
         if (tv != touch_state) {
             touch_state = tv;
             const bool touched = LM_TOUCH_ACTIVE_HIGH ? (tv != 0) : (tv == 0);
-            if (touched && (TickType_t)(now - last_touch) >= pdMS_TO_TICKS(LM_AUX_TAP_MS)) {
+            // Debounce the press edge only; the release must always be reported, or a
+            // suppressed `up` would leave the host believing the control is still held.
+            if (!touched) {
+                out_line("touch up\n");
+            } else if ((TickType_t)(now - last_touch) >= pdMS_TO_TICKS(LM_AUX_TAP_MS)) {
                 last_touch = now;
-                out_line("touch\n");
+                out_line("touch down\n");
             }
         }
 
         uint8_t rv = (uint8_t)gpio_get_level(LM_PIN_REAR);
         if (rv != rear_state) {
             rear_state = rv;
-            if (!rv && (TickType_t)(now - last_rear) >= pdMS_TO_TICKS(LM_AUX_TAP_MS)) {
+            const bool pressed = (rv == 0);          // active low
+            if (!pressed) {
+                out_line("rear up\n");
+            } else if ((TickType_t)(now - last_rear) >= pdMS_TO_TICKS(LM_AUX_TAP_MS)) {
                 last_rear = now;
-                out_line("rear\n");
+                out_line("rear down\n");
             }
         }
 
@@ -767,6 +883,246 @@ static void aux_inputs_start(void)
 }
 
 #endif /* LM_ENABLE_UNVERIFIED_INPUTS */
+
+// ---- battery: MAX77972 fuel gauge, read-only --------------------------------
+//
+// See the big evidence block near the top of the file for where every address
+// below comes from. Structure of this section:
+//
+//   batt_read16()   one register read, no retries beyond the driver's own
+//   batt_sample()   the five reads + the arithmetic, into a snapshot struct
+//   batt_task()     poll, and emit `batt <pct> <0|1>` ONLY when it changes
+//   cmd_batt()      the on-demand report
+//
+// The published state is a small struct guarded by the same discipline as the
+// rest of the file: written only by the battery task, read by the command loop.
+// It is four scalars and a bool, so a torn read can only ever mix two adjacent
+// samples of the same battery -- not worth a mutex, and a mutex here could block
+// the command loop behind an I2C timeout, which is exactly what we don't want.
+
+#if LM_ENABLE_BATTERY
+
+typedef struct {
+    bool     valid;      // false = unknown; NEVER report a percentage when false
+    uint8_t  percent;    // 0..100, from REPSOC
+    uint8_t  charging;   // 0/1, from chg_dtls
+    uint16_t mv;         // cell millivolts, for diagnostics
+    uint16_t repsoc;     // raw register values, so a human can check the decode
+    uint16_t vfsoc;
+    uint16_t chgdet;
+    uint16_t status;
+} batt_state_t;
+
+static batt_state_t s_batt;          // published reading
+static int  s_batt_scl = -1;         // which SCL GPIO actually answered
+static bool s_batt_live;             // bus is up and the gauge ACKed at least once
+
+static i2c_master_bus_handle_t s_i2c_bus;
+static i2c_master_dev_handle_t s_fg_dev;
+
+// One 16-bit register, LSB first, exactly as stock's transport assembles it.
+static esp_err_t batt_read16(uint8_t reg, uint16_t *out)
+{
+    if (!s_fg_dev) return ESP_ERR_INVALID_STATE;
+    uint8_t rx[2] = {0, 0};
+    esp_err_t e = i2c_master_transmit_receive(s_fg_dev, &reg, 1, rx, sizeof(rx), 50);
+    if (e != ESP_OK) return e;
+    *out = (uint16_t)(rx[0] | ((uint16_t)rx[1] << 8));
+    return ESP_OK;
+}
+
+// Bring the bus up on `scl` and see whether the gauge ACKs. Leaves the bus
+// installed on success; fully tears it down on failure, so a wrong pin guess
+// does not leave a pad configured as an open-drain output.
+static bool batt_try_bus(int scl)
+{
+    i2c_master_bus_config_t bcfg = {
+        .i2c_port = -1,                 // let the driver pick a free port
+        .sda_io_num = (gpio_num_t)LM_I2C_SDA_GPIO,
+        .scl_io_num = (gpio_num_t)scl,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags = { .enable_internal_pullup = true },
+    };
+    if (i2c_new_master_bus(&bcfg, &s_i2c_bus) != ESP_OK) {
+        s_i2c_bus = NULL;
+        return false;
+    }
+
+    // Address-only probe. This is a write of the address byte and nothing else --
+    // it cannot alter a register, which is the whole reason it is safe to try a
+    // pin the documentation disagrees with.
+    if (i2c_master_probe(s_i2c_bus, LM_FG_ADDR, 100) != ESP_OK) {
+        i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
+        // Put both pads back to plain inputs so nothing is left driving them.
+        gpio_reset_pin((gpio_num_t)LM_I2C_SDA_GPIO);
+        gpio_reset_pin((gpio_num_t)scl);
+        return false;
+    }
+
+    i2c_device_config_t dcfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = LM_FG_ADDR,
+        .scl_speed_hz    = LM_I2C_HZ,
+    };
+    if (i2c_master_bus_add_device(s_i2c_bus, &dcfg, &s_fg_dev) != ESP_OK) {
+        s_fg_dev = NULL;
+        i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
+        return false;
+    }
+    return true;
+}
+
+// Read the five registers and turn them into a snapshot. Returns false, and
+// leaves *out untouched, on any read failure or implausible reading.
+static bool batt_sample(batt_state_t *out)
+{
+    uint16_t repsoc = 0, vcell = 0, chgdet = 0, vfsoc = 0, status = 0;
+
+    if (batt_read16(LM_REG_REPSOC, &repsoc) != ESP_OK) return false;
+    if (batt_read16(LM_REG_VCELL, &vcell) != ESP_OK) return false;
+    if (batt_read16(LM_REG_CHG_DETAILS, &chgdet) != ESP_OK) return false;
+    // The next two are diagnostics only; a failure on them still fails the sample,
+    // because a bus that half-works is a bus we should not be trusting.
+    if (batt_read16(LM_REG_VFSOC, &vfsoc) != ESP_OK) return false;
+    if (batt_read16(LM_REG_STATUS, &status) != ESP_OK) return false;
+
+    // 78.125 uV per LSB -> millivolts. 64-bit because 65535 * 78125 overflows u32.
+    uint32_t mv = (uint32_t)(((uint64_t)vcell * 78125ULL) / 1000000ULL);
+    if (mv < LM_BATT_MV_MIN || mv > LM_BATT_MV_MAX) return false;
+
+    // REPSOC is percent in 1/256 steps. Round rather than truncate, then clamp:
+    // a healthy m5 gauge can read slightly over 100 % right after a full charge.
+    uint32_t pct = ((uint32_t)repsoc + 128u) >> 8;
+    if (pct > 110u) return false;          // not a percentage; distrust the read
+    if (pct > 100u) pct = 100u;
+
+    uint8_t chg_dtls = (uint8_t)((chgdet >> 8) & 0x0Fu);
+
+    out->valid    = true;
+    out->percent  = (uint8_t)pct;
+    out->charging = (chg_dtls <= 2u) ? 1u : 0u;
+    out->mv       = (uint16_t)mv;
+    out->repsoc   = repsoc;
+    out->vfsoc    = vfsoc;
+    out->chgdet   = chgdet;
+    out->status   = status;
+    return true;
+}
+
+static void batt_task(void *arg)
+{
+    (void)arg;
+
+    // Try the vendor-attested SCL first, then the value docs/HARDWARE.md gives.
+    // A couple of attempts each, because a boot-time bus glitch should not
+    // permanently write the feature off.
+    const int scl_candidates[2] = { LM_I2C_SCL_GPIO, LM_I2C_SCL_ALT };
+    for (int attempt = 0; attempt < 2 && !s_batt_live; attempt++) {
+        for (int i = 0; i < 2; i++) {
+            if (batt_try_bus(scl_candidates[i])) {
+                s_batt_scl  = scl_candidates[i];
+                s_batt_live = true;
+                break;
+            }
+        }
+        if (!s_batt_live) vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    if (!s_batt_live) {
+        // Loud, once. The pad keeps working; `ver` will say batt=unknown.
+        out_line("# batt no ack from 0x%02x on SDA=%d with SCL=%d or %d "
+                 "- battery reporting disabled, everything else unaffected\n",
+                 LM_FG_ADDR, LM_I2C_SDA_GPIO, LM_I2C_SCL_GPIO, LM_I2C_SCL_ALT);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    out_line("# batt gauge 0x%02x acked on SDA=%d SCL=%d%s\n",
+             LM_FG_ADDR, LM_I2C_SDA_GPIO, s_batt_scl,
+             (s_batt_scl == LM_I2C_SCL_ALT)
+                 ? " (the docs/HARDWARE.md pin, not the vendor firmware's 18)"
+                 : " (the vendor firmware's pin; docs/HARDWARE.md says 9)");
+
+    int  fails = 0;
+    bool reported_unknown = false;
+    bool have_reported = false;
+    uint8_t last_pct = 0, last_chg = 0;
+
+    for (;;) {
+        batt_state_t s = {0};
+        if (batt_sample(&s)) {
+            fails = 0;
+            reported_unknown = false;
+            s_batt = s;
+            // Emit only on change. At 115200 the link is the scarce resource, and
+            // a percentage that has not moved is not news.
+            if (!have_reported || s.percent != last_pct || s.charging != last_chg) {
+                have_reported = true;
+                last_pct = s.percent;
+                last_chg = s.charging;
+                out_line("batt %u %u\n", (unsigned)s.percent, (unsigned)s.charging);
+            }
+        } else if (++fails >= LM_BATT_FAILS_MAX) {
+            s_batt.valid = false;
+            have_reported = false;      // re-announce once the gauge comes back
+            if (!reported_unknown) {
+                reported_unknown = true;
+                out_line("# batt read failed %d times - reporting unknown, "
+                         "no percentage emitted\n", fails);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(LM_BATT_POLL_MS));
+    }
+}
+
+static void batt_start(void)
+{
+    xTaskCreatePinnedToCore(batt_task, "lm_batt", 4096, NULL, 3, NULL, 1);
+}
+
+#else  /* !LM_ENABLE_BATTERY */
+
+static void batt_start(void)
+{
+    ESP_LOGW(TAG, "battery reporting compiled OUT - set LM_ENABLE_BATTERY=1");
+}
+
+#endif /* LM_ENABLE_BATTERY */
+
+// What `ver` advertises, so the host can tell "this firmware has no battery
+// support at all" from "it has support but the gauge is not answering".
+static const char *batt_cap(void)
+{
+#if LM_ENABLE_BATTERY
+    if (!s_batt_live)  return "unknown";   // bus never came up / gauge silent
+    return s_batt.valid ? "ok" : "unknown";
+#else
+    return "none";
+#endif
+}
+
+// `batt` — report the current reading on demand. Always answers; answers
+// "unknown" rather than inventing a number.
+static void cmd_batt(void)
+{
+#if LM_ENABLE_BATTERY
+    batt_state_t s = s_batt;             // one copy, so the reply is self-consistent
+    if (!s.valid) {
+        out_line("ok batt unknown live=%d scl=%d\n", s_batt_live ? 1 : 0, s_batt_scl);
+        return;
+    }
+    out_line("ok batt %u %u mv=%u repsoc=%04x vfsoc=%04x chgdet=%04x "
+             "chgdtls=%x status=%04x scl=%d\n",
+             (unsigned)s.percent, (unsigned)s.charging, (unsigned)s.mv,
+             s.repsoc, s.vfsoc, s.chgdet, (unsigned)((s.chgdet >> 8) & 0xF),
+             s.status, s_batt_scl);
+#else
+    out_line("ok batt none\n");
+#endif
+}
 
 // ---- serial command parser -------------------------------------------------
 
@@ -881,17 +1237,25 @@ static void handle_line(char *line)
     if (!strcmp(tok[0], "demo"))  { demo_burst(120); all_off(); out_line("ok demo\n"); return; }
     if (!strcmp(tok[0], "dump"))  { dump_regs("live"); out_line("ok dump\n"); return; }
     if (!strcmp(tok[0], "mscan")) { cmd_mscan(); return; }
+    if (!strcmp(tok[0], "batt"))  { cmd_batt(); return; }
     if (!strcmp(tok[0], "ver")) {
         // Lets the host detect batched-frame support instead of guessing; it falls
         // back to per-pixel `k`/`u` when this is absent or reports frames=0.
-        out_line("ok ver 2 keys=%d under=%d frames=1 events=key%s\n",
+        // batt=none|unknown|ok distinguishes "no battery support in this build"
+        // from "support present, gauge not answering" from "reading is live".
+        out_line("ok ver 2 keys=%d under=%d frames=1 events=key%s%s batt=%s\n",
                  KEY_N, AMB_N,
 #if LM_ENABLE_UNVERIFIED_INPUTS
-                 ",enc,touch,rear"
+                 ",enc,touch,rear",
 #else
-                 ""
+                 "",
 #endif
-                 );
+#if LM_ENABLE_BATTERY
+                 ",batt",
+#else
+                 "",
+#endif
+                 batt_cap());
         return;
     }
     if (!strcmp(tok[0], "tflash")) { status_flash(nt >= 2 ? atoi(tok[1]) : 6); out_line("ok tflash\n"); return; }
@@ -984,6 +1348,11 @@ void app_main(void)
     mtx_gpio_init();
     xTaskCreatePinnedToCore(mtx_scan_task, "lm_scan", 3072, NULL, 5, &s_scan_task, 1);
     aux_inputs_start();
+
+    // 7. Battery. Lowest priority of the three, and last, because it is the only
+    //    one that can block on an external device: its very first act is an I2C
+    //    probe that may time out. Nothing above it may wait on that.
+    batt_start();
 
     out_line("ok ready keys=%d under=%d v2 frames=1\n", s_keys?KEY_N:0, s_amb?AMB_N:0);
 

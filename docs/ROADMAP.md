@@ -176,7 +176,7 @@ Driven by Claude Code hooks rather than polling, which is what makes *waiting-fo
 observable at all. Watching the session transcript was investigated and rejected: a session
 sitting on a permission prompt writes nothing, so the state that matters most is invisible to it.
 
-## Phase 8 — Power, sleep and battery (firmware)
+## Phase 8 — Power, sleep and battery (firmware) 🟡 **battery slice written, not flashed**
 
 - Deliberate **power off** via long-press that survives unplugging: latch pads into the RTC
   domain, deep-sleep, wake on the same button — and **release holds at boot**, the exact step whose
@@ -190,6 +190,16 @@ becomes annoying in daily use — it's independent of Phases 3–7.
 
 **Done when:** the pad powers off and back on cleanly, sleeps on idle and wakes on input, and
 reports battery state to the host.
+
+Battery reporting is written and compiles: `batt <pct> <0|1>` on change, plus a `batt` command
+that dumps the raw gauge registers. Read-only, never writes a register, never touches
+charge-enable. The MAX77972 has no public datasheet, so the register map was decoded from stock
+(see [`HARDWARE.md`](HARDWARE.md)) — and that turned up a likely error in this repo's own notes:
+I²C SCL is 18, not 9. Since SCL is an output and the two disagree, the firmware probes both
+rather than picking, and the boot log says which answered.
+
+Power off, staged idle sleep and wake are still to do, and they are gated on the GPIO 2 hazards
+in `HARDWARE.md` — the ULP rescue watcher and stock's wait-for-release guard before arming ext0.
 
 ## Phase 9 — Bluetooth: pairing and BLE HID standalone
 

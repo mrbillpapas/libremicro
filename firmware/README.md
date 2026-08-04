@@ -19,11 +19,12 @@ unchanged, so a host that doesn't know about v2 sees no difference.
 | `mscan` | prints the raw matrix bitmap — the tool for confirming the index mapping |
 | `ver` | reports feature support so the host can detect batching instead of guessing |
 | Guarded inputs | encoder / touch / rear, compiled **out** by default (see below) |
+| Battery reporting | MAX77972 fuel gauge over I²C, read-only; emits `batt <pct> <0\|1>` on change, plus a `batt` command (see below) |
 
 Events and acks share one link and are told apart by line prefix: acks always begin `ok` or
-`err`, events always begin `key` / `enc` / `touch` / `rear`, and diagnostics begin `#` (which
-the host ignores). All output goes through one mutex so a line is never cut in half by the
-other writer.
+`err`, events always begin `key` / `enc` / `touch` / `rear` / `batt`, and diagnostics begin `#`
+(which the host ignores). All output goes through one mutex so a line is never cut in half by
+the other writer.
 
 Scanning lives in its own task pinned to core 1, woken by an any-edge interrupt on the
 column inputs, so it neither starves nor is starved by the command loop on core 0. While
@@ -94,6 +95,54 @@ To build it once the pins are confirmed:
 PLATFORMIO_BUILD_FLAGS=-DLM_ENABLE_UNVERIFIED_INPUTS=1 pio run
 ```
 
+### Battery reporting — MAX77972, read-only (Phase 8, first slice)
+
+`LM_ENABLE_BATTERY` is **on** by default. It emits `batt <percent> <0|1>` (the shape
+`docs/PROTOCOL.md` already specifies and the host already parses) **only when the value
+changes**, polling every 15 s. `batt` reports the current reading on demand with the raw
+registers alongside it, and `ver` now carries `batt=none|unknown|ok`, so a host can tell "this
+build has no battery support" from "support present, gauge silent" from "reading is live".
+
+There is no MAX77972 datasheet, so the vendor v0.6.1 image *is* the datasheet. What was
+decoded (full evidence in the comment block at the top of `src/main.c`, addresses included):
+
+| | |
+|---|---|
+| I²C addresses | **0x36** for registers `0x000–0x0FF`, **0x37** for `0x100–0x1FF`. Both of stock's register accessors compute `addr = (reg > 0xFF) ? 0x37 : 0x36`. Only bank 0 is used here. |
+| Register width | 16-bit, **LSB first** — stock's transport assembles `(second << 8) \| first`. |
+| Percent | `REPSOC` = reg **0x07**, `1/256 %` per LSB. That is the register and scale stock's own `soc` accessor uses. |
+| Charging | `chg_dtls = (reg 0xD7 >> 8) & 0x0F`; **charging ⇔ `chg_dtls ≤ 2`**. Stock's `is_charging()` is true exactly for its prequal-trickle / fast-CC / fast-CV-or-topoff states, and its state decoder produces those three from `chg_dtls` 0, 1 and 2. Two independent code paths, same answer. `chg_dtls == 8` is stock's *charge_done* — full, deliberately **not** charging. |
+| Sanity gate | `VCELL` = reg **0x1A**, `78.125 µV` per LSB. A reading outside 2000–5000 mV, or a percent above 110, is treated as "not a battery" and reported unknown. |
+
+The scale factors are what actually identify these registers, and they're textbook ModelGauge
+m5: 0.5 mAh and 0.15625 mA per LSB (both implying a 10 mΩ sense resistor), 1/256 °C, and a
+surrounding map that matches m5 exactly — 0x10 FullCapRep, 0x23 FullCapNom, 0x17 Cycles,
+0x34 DieTemp, 0xFF VFSOC, 0x00 Status with POR in bit 1. That cross-check is why these are
+read as decoded facts rather than guesses, and why the flag defaults on.
+
+**The one open question: SCL is GPIO 18, not 9.** `docs/HARDWARE.md` lists I²C as GPIO 8/9.
+SDA 8 matches; SCL does not. `wl_io::init` calls `Wire.begin(8, 18, 100000)` with all three as
+literals. GPIO 8/9 is also the arduino-esp32 *default* I²C pair for the ESP32-S3 — exactly what
+you'd write down if you assumed rather than measured — and stock explicitly overrides that
+default with 18 while leaving SDA alone. Neither GPIO 9 nor GPIO 18 is configured for anything
+else anywhere in the vendor image.
+
+Because SCL is an **output** and the doc disagrees, the firmware does not pick: it brings the
+bus up on SCL=18, asks 0x36 to ACK, and if it doesn't, tears the bus down (releasing both pads
+back to inputs) and retries on SCL=9. Whichever ACKs wins, and the boot notice and `batt` both
+report which one — so one flash settles it for the doc.
+
+**What this block will never do:** write a MAX77972 register (not one); touch GPIO 44, the
+charge-enable; report a percentage it didn't read; or take the LEDs or matrix down with it. An
+address-only I²C probe cannot alter a register, which is what makes trying a disputed pin safe.
+Every failure path reports unknown once on a `#` line and the pad keeps working.
+
+To compile it out entirely (no I²C pin is then ever configured, `ver` reports `batt=none`):
+
+```bash
+PLATFORMIO_BUILD_FLAGS=-DLM_ENABLE_BATTERY=0 pio run
+```
+
 ### First flash — what a human must check
 
 1. **LEDs still light.** The v1 boot path is unchanged, but v2 adds the eight matrix pads to the
@@ -108,6 +157,23 @@ PLATFORMIO_BUILD_FLAGS=-DLM_ENABLE_UNVERIFIED_INPUTS=1 pio run
    wrong for this board.
 5. **`kf` / `uf` paint the whole zone** and are visibly smoother than per-pixel writes.
 6. Confirm nothing regressed in `k`, `u`, `t`, `bright`, `clear`, `demo`, `dump`.
+7. **Which SCL pin answered.** At boot, look for
+   `# batt gauge 0x36 acked on SDA=8 SCL=18` (or `SCL=9`). Whichever it says is the truth about
+   the board — write it into `docs/HARDWARE.md`, which currently says 9. If instead you get
+   `# batt no ack ...`, neither pin worked: the LEDs and keys are unaffected, but the pin map
+   or the pull-ups need a look.
+8. **Does the percentage match reality?** Run `batt` and compare `<pct>` against the charge
+   level you actually expect. The raw registers are on the same line: `repsoc` should be
+   `pct*256` give or take, `vfsoc` should be within a few percent of it (`vfsoc >> 8` is a
+   percent too), and `mv` should be a sane 1S cell voltage. If `repsoc` and `vfsoc` disagree
+   wildly, or `pct` is nonsense while `mv` looks right, register **0x07** is the thing to
+   re-examine.
+9. **Does `charging` follow the cable?** Unplug USB → `batt <pct> 0` within one poll (15 s).
+   Plug in on a not-full battery → `batt <pct> 1`. On a *full* battery plugged in, expect `0`,
+   not `1`: `chg_dtls` moves to stock's charge-done state and stock reports not-charging there
+   too. Check `chgdtls=` in the `batt` reply if it looks wrong.
+10. **No `batt` spam.** Sitting idle, the link should be silent between changes. A `batt` line
+    every 15 s means the change-detection isn't working.
 
 ## Build
 
@@ -141,12 +207,17 @@ See `docs/RECOVERY.md` for restore and recovery.
 2. Release battery-backed pad holds (else GPIO writes are ignored — see `docs/HARDWARE.md`).
    v2 adds the eight key-matrix pads to this list: a latched hold on a row pad would make
    `gpio_set_level` silently do nothing and the matrix would read as permanently idle — the
-   same failure mode that kept the LED rail dark, on a different pin.
+   same failure mode that kept the LED rail dark, on a different pin. The battery work adds
+   the I²C pads (8, 9, 18) for the same reason — a held SDA or SCL means every transaction
+   times out. GPIO 44 (charge-enable) is *released* here and never driven anywhere.
 3. Drive the LED power rail (GPIO 36/37/38 high).
 4. Init both addressable strips + the 3 PWM status LEDs.
 5. Run a startup rainbow.
 6. Bring up the serial link, *then* start the matrix scan task — so no event line can be
    emitted before there's a host-visible stream to put it on.
+7. Start the battery task **last** and at the lowest priority of the three: it is the only one
+   whose first act can block on an external device (an I²C probe that may time out), so nothing
+   above it is allowed to wait on it.
 
 Steps 1–3 are load-bearing and unchanged from v1; that ordering is what makes the LEDs work
 at all.

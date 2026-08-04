@@ -21,6 +21,8 @@ Every command is one line; the device replies with a line starting `ok` or `err`
 | `clear` | all addressable LEDs off |
 | `demo` | run the built-in per-key rainbow sweep |
 | `dump` | print the inherited hold/GPIO register state (diagnostics) |
+| `batt` | report battery state now, plus the raw gauge registers (diagnostics) |
+| `ver` | report protocol version and feature support |
 
 Colours are `rrggbb` hex. `bright` scales all addressable pixels; the status LEDs take a raw
 0–255 PWM duty.
@@ -80,16 +82,19 @@ behind `LM_ENABLE_UNVERIFIED_INPUTS` (off by default) until their pins are confi
 | `rear` | rear button pressed |
 | `batt <percent> <0\|1>` | battery state of charge and whether it's charging (Phase 8) |
 
-### Known limitation: `hold` can't work for touch or rear
+### Touch and rear report both edges
 
-The firmware emits a single bare `touch` / `rear` line on the active edge, so the host sees a
-tap with **no duration** — which means a `hold` binding on either control can never fire. Keys
-are fine; they send a real `down`/`up` pair.
+`touch down` / `touch up`, and likewise for `rear`. The bare single-line form is still accepted
+by the host's parser, but the firmware no longer uses it: a bare line carries no duration, so a
+`hold` binding on those two controls could never fire. Only the *press* edge is debounced —
+suppressing a release would leave the host believing the control is still held.
 
-The fix is for the firmware to emit `touch down` / `touch up` and `rear down` / `rear up`.
-`parse_device_line` already accepts both spellings, so this is a firmware-only change with no
-host work. Until then, treat `hold` on touch and rear as dead config — the web UI's binding
-editor says so at the point you'd bind it.
+### `ver` capability reply
+
+`ok ver 2 keys=13 under=8 frames=1 events=key,batt batt=ok`. The host parses this into feature
+flags rather than assuming: `frames=1` enables batched writes, `batt=none|unknown|ok` reports
+whether the gauge answered, and `events=` lists what this build actually emits. v1 firmware
+answers `err unknown`, which is how the host knows it's talking to an LED-only device.
 
 Events and commands share the port, so the daemon both reads events and writes LED commands
 on one serial connection. Lines are prefixed unambiguously (`ok`/`err` for command replies vs.
