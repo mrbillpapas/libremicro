@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mrbillpapas/libremicro/host/config/schema.json",
+  "title": "LibreMicro config",
+  "description": "Declarative config for the LibreMicro host daemon: per-key launch/colour/notification bindings, modes, and encoder behaviour. Designed to be generated and edited by an AI from this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["keys"],
+  "properties": {
+    "port": {
+      "description": "Serial port of the CM2, or 'auto' to pick the first /dev/cu.usbmodem*.",
+      "type": "string",
+      "default": "auto"
+    },
+    "brightness": {
+      "description": "Global brightness scale for the addressable LEDs (0-255).",
+      "type": "integer", "minimum": 0, "maximum": 255, "default": 200
+    },
+    "keys": {
+      "description": "Per-key bindings. index 0-12 maps to the 13 physical keys.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/key" }
+    },
+    "modes": {
+      "description": "Named modes. Activating one flashes its key and rebinds the encoder.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/mode" }
+    },
+    "default_encoder": {
+      "description": "Encoder binding when no mode is active.",
+      "$ref": "#/$defs/encoder"
+    }
+  },
+  "$defs": {
+    "color": {
+      "description": "RGB hex, 'rrggbb' (no leading #).",
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{6}$"
+    },
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "label": { "type": "string" },
+        "color": { "$ref": "#/$defs/color" },
+        "launch": {
+          "description": "macOS app name to open with `open -a` on press.",
+          "type": "string"
+        },
+        "command": {
+          "description": "Shell command to run on press (alternative to launch).",
+          "type": "string"
+        },
+        "mode": {
+          "description": "If set, pressing this key activates the named mode instead of launching.",
+          "type": "string"
+        },
+        "watch": { "$ref": "#/$defs/watch" }
+      }
+    },
+    "watch": {
+      "description": "A background watcher that pulses this key's LED on external state.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "flash"],
+      "properties": {
+        "type": {
+          "description": "Watcher kind. 'slack_unread' and 'unread_badge' are examples; the daemon defines the available kinds.",
+          "type": "string"
+        },
+        "flash": { "$ref": "#/$defs/color" }
+      }
+    },
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activate_key", "encoder"],
+      "properties": {
+        "activate_key": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "flash": { "$ref": "#/$defs/color" },
+        "encoder": { "$ref": "#/$defs/encoder" }
+      }
+    },
+    "encoder": {
+      "description": "Encoder actions. Values are action tokens the daemon knows (e.g. vol_up, vol_down, play_pause, desk_up, desk_down, stand_sit, or a shell: prefix).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cw": { "type": "string" },
+        "ccw": { "type": "string" },
+        "press": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "./schema.json",
+  "port": "auto",
+  "brightness": 200,
+  "keys": [
+    { "index": 0, "label": "Slack",    "launch": "Slack",    "color": "4a154b",
+      "watch": { "type": "slack_unread", "flash": "e01e5a" } },
+    { "index": 1, "label": "Zoom",     "launch": "zoom.us",  "color": "2d8cff" },
+    { "index": 2, "label": "WhatsApp", "launch": "WhatsApp", "color": "25d366",
+      "watch": { "type": "unread_badge", "app": "WhatsApp", "flash": "25d366" } },
+    { "index": 3, "label": "Messages", "launch": "Messages", "color": "34da50" },
+    { "index": 4, "label": "Chrome-Work", "command": "open -na 'Google Chrome' --args --profile-directory='Default'", "color": "ffcd39" },
+    { "index": 5, "label": "Chrome-Personal", "command": "open -na 'Google Chrome' --args --profile-directory='Profile 1'", "color": "4285f4" },
+    { "index": 6, "label": "Media",    "color": "00ff88", "mode": "media" },
+    { "index": 7, "label": "Desk",     "color": "ff8800", "mode": "desk" }
+  ],
+  "modes": {
+    "media": {
+      "activate_key": 6,
+      "flash": "00ff88",
+      "encoder": { "cw": "vol_up", "ccw": "vol_down", "press": "play_pause" }
+    },
+    "desk": {
+      "activate_key": 7,
+      "flash": "ff8800",
+      "encoder": { "cw": "desk_up", "ccw": "desk_down", "press": "stand_sit" }
+    }
+  },
+  "default_encoder": { "cw": "vol_up", "ccw": "vol_down", "press": "play_pause" }
+}

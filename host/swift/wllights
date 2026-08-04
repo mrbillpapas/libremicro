@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# wllights — drive Creator Micro 2 lighting over the reverse-engineered vendor RPC.
+#
+# The firmware's lighting model is TWO ZONES, not per-key:
+#   backlight = all key LEDs together
+#   underglow = the ambient strip
+# Each zone takes one effect + one colour + brightness + speed.
+#
+# Effects the firmware actually implements (from its own string table):
+#   solid  snake  rainbow  gradient  shallow_breath  off
+# NOTE: firmware says "shallow_breath"; the vendor SDK enum says "breath".
+# snake/gradient/rainbow animate across individual LEDs, so the hardware IS
+# per-LED addressable — the RPC just exposes no per-key colour setter.
+#
+# usage:
+#   wllights <backlightEffect> <backlightHex> [underglowEffect] [underglowHex] [brightness]
+#
+# examples:
+#   wllights solid ff0000                      # all keys red, underglow untouched shape
+#   wllights solid 00ff88 rainbow ffffff       # mint keys, rainbow underglow
+#   wllights gradient ff00ff solid 000033 0.6   # gradient across keys, dim blue ambient
+#   wllights off 000000 off 000000             # everything dark
+#
+# restore your saved profile:  wllights solid ffffff rainbow ffffff
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+BL_EFFECT="${1:-solid}"
+BL_HEX="${2:-ffffff}"
+UG_EFFECT="${3:-$BL_EFFECT}"
+UG_HEX="${4:-$BL_HEX}"
+BRIGHT="${5:-1}"
+
+hex2int() { printf '%d' "0x${1#\#}"; }
+
+BL=$(hex2int "$BL_HEX")
+UG=$(hex2int "$UG_HEX")
+
+read -r -d '' PARAMS <<JSON || true
+{"backlight":{"effect":"$BL_EFFECT","brightness":$BRIGHT,"speed":0.5,"magic":1,"color":$BL},
+ "underglow":{"effect":"$UG_EFFECT","brightness":$BRIGHT,"speed":0.55,"magic":1,"color":$UG}}
+JSON
+
+exec ./wlrpc lights.preview "$(echo "$PARAMS" | tr -d '\n')"

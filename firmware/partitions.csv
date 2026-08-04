@@ -1,0 +1,19 @@
+# Partition table copied EXACTLY from the device's own table (read at 0x8000 of
+# the flash dump), so our app lands in the same `factory` slot the vendor
+# bootloader boots, and nvs / fs are left untouched at their original offsets.
+#
+#   phy_init 0x00F000      4K   data,phy
+#   factory  0x010000   8192K   app,factory
+#   nvs      0x810000    128K   data,nvs
+#   fs       0x830000   2048K   data,subtype 0x82  (littlefs; `spiffs` == 0x82)
+#   coredump 0xA30000     64K   data,coredump
+#
+# Because only the app region is written when flashing, keymap.json in `fs` and
+# the BLE pairing keys in `nvs` survive.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+phy_init,   data, phy,      0xF000,   0x1000,
+factory,    app,  factory,  0x10000,  0x800000,
+nvs,        data, nvs,      0x810000, 0x20000,
+fs,         data, spiffs,   0x830000, 0x200000,
+coredump,   data, coredump, 0xA30000, 0x10000,

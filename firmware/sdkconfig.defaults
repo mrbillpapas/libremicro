@@ -1,0 +1,20 @@
+# 16MB flash to match the ESP32-S3-WROOM-1 N16R8 module
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Use the device's own partition table verbatim, so our app lands in the same
+# `factory` slot the vendor bootloader boots and nvs/fs keep their offsets.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Console on USB-Serial-JTAG. This also keeps that peripheral active at all
+# times, so esptool can always reconnect for recovery without BOOT/RESET.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# CRITICAL: keep octal PSRAM OFF. On the N16R8, octal PSRAM claims GPIO33-37 for
+# SPIIO4-7/DQS. GPIO36/37 are the top-board LED power-rail enables (36 = the
+# addressable-LED VDD gate), so with PSRAM mapped to those pads the LEDs can
+# never be powered. Stock firmware itself runs with PSRAM disabled for the same
+# reason (it uses GPIO35 as LEDC and 36/37 as plain GPIO rails).
+CONFIG_SPIRAM=n

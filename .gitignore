@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# PlatformIO / ESP-IDF build trees + fetched components
+**/.pio/
+**/managed_components/
+firmware/sdkconfig.cm2
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Compiled Swift binaries (build from the .swift sources)
+host/swift/wlrpc
+host/swift/wllist
+host/swift/wlmon
+host/swift/rpc_probe
+host/swift/rpc_raw
+
+# Xtensa toolchain — fetched separately, never committed (see tools/README.md)
+tools/xtensa-esp-elf/
+tools/*.tar.xz
+
+# Vendor material — NEVER commit. Keep locally if you need it for restore.
+firmware-vendor/
+*.bin
+*.merged.bin
+efuse_summary.txt
+
+# macOS
+.DS_Store
