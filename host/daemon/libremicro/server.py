@@ -46,6 +46,14 @@ class Api:
     def get_palettes(self) -> dict:
         return palette_mod.catalog()
 
+    def get_events(self, since: int = 0) -> dict:
+        """Recent input events, newest last. `?since=<seq>` returns only newer ones, so the
+        UI can poll cheaply instead of needing a streaming connection."""
+        events = [e for e in self.daemon.recent_events if e["seq"] > since]
+        latest = self.daemon.recent_events[-1]["seq"] if self.daemon.recent_events else 0
+        return {"events": events, "latest_seq": latest,
+                "input_events_seen": self.daemon.link.saw_input_event}
+
     def get_status(self) -> dict:
         d = self.daemon
         return {
@@ -184,7 +192,17 @@ class _Handler(BaseHTTPRequestHandler):
     # --- routing -----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
+        if path == "/api/events":
+            since = 0
+            for part in query.split("&"):
+                if part.startswith("since="):
+                    try:
+                        since = int(part[6:])
+                    except ValueError:
+                        since = 0
+            self._json(200, self.api.get_events(since))
+            return
         routes: dict[str, Callable[[], Any]] = {
             "/api/config": self.api.get_config,
             "/api/schema": self.api.get_schema,

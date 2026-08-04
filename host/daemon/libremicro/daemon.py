@@ -8,9 +8,12 @@ lands in Phase 3, on top of this.
 """
 from __future__ import annotations
 
+import itertools
 import signal
 import sys
 import threading
+import time
+from collections import deque
 
 from .config import Config, ConfigError
 from .dispatch import Dispatcher
@@ -24,6 +27,11 @@ class Daemon:
         self.cfg = config
         self.battery: dict | None = None      # populated in Phase 8 from the MAX77972
         self._stopping = threading.Event()
+        # A short history of what the pad sent, so the web UI can show which index arrived
+        # when you press a physical key — that's how the matrix-to-physical mapping gets
+        # confirmed, the same way the identify sweep confirmed the LED wiring.
+        self.recent_events: deque[dict] = deque(maxlen=200)
+        self._event_seq = itertools.count(1)
 
         self.link = Link(port=self.cfg.port, baud=self.cfg.baud,
                          layout=self.cfg.layout, on_event=self.handle_event)
@@ -109,7 +117,18 @@ class Daemon:
         the work — recognising hold/double, resolving bindings, running actions — happens in
         the dispatcher, and actions themselves are spawned rather than awaited.
         """
+        self._record_event(kind, args, source="device")
         self.dispatcher.feed(kind, args)
+
+    def _record_event(self, kind: str, args: list[str], source: str) -> None:
+        self.recent_events.append({
+            "seq": next(self._event_seq),
+            "at": time.time(),
+            "source": source,
+            "event": kind,
+            "args": list(args),
+            "line": " ".join([kind, *args]),
+        })
 
     def inject_event(self, kind: str, args: list[str]) -> None:
         """Feed a synthetic event as though it came from the device.
@@ -119,6 +138,7 @@ class Daemon:
         actually launch the app, which also makes the whole dispatch path testable.
         """
         print(f"libremicro: injected event: {kind} {' '.join(args)}", flush=True)
+        self._record_event(kind, args, source="injected")
         self.dispatcher.feed(kind, args)
 
 
