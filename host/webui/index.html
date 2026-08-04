@@ -57,16 +57,45 @@
       <button id="btn-make-active" type="button" class="ghost small" title="Set this profile as active_profile in the config">Make active</button>
     </div>
 
-    <div class="deviceview">
-      <svg id="device" viewBox="0 0 400 412" role="group" aria-label="Creator Micro 2 LED layout">
-        <!-- built by app.js from layout.key_rows and the index mappings -->
-      </svg>
+    <!-- data-view is written by app.js: "2d" is the flat SVG, "3d" swaps in the WebGL canvas and
+         demotes the SVG to the keyboard/accessibility layer (see style.css). -->
+    <div class="deviceview" data-view="2d">
+      <!-- Which of the three sources the board is showing. Never decorative: a simulation that
+           claims to be the device is the bug this exists to prevent. -->
+      <div class="viewsrc" id="view-src" data-mode="preview" aria-live="polite">
+        <i class="dot" data-state="unknown" aria-hidden="true"></i>
+        <span class="v">…</span>
+      </div>
+      <div class="dv-stack">
+        <!-- The 3D view. aria-hidden because the SVG below it carries the real accessible tree. -->
+        <canvas id="device3d" aria-hidden="true"></canvas>
+        <svg id="device" viewBox="0 0 400 412" role="group" aria-label="Creator Micro 2 LED layout">
+          <!-- built by app.js from layout.key_rows and the index mappings -->
+        </svg>
+      </div>
+      <div class="dv-cam" id="dv-cam">
+        <span class="dv-hint">drag to orbit</span>
+        <button type="button" data-cam="three" title="Three-quarter view">¾</button>
+        <button type="button" data-cam="front" title="Low front view">front</button>
+        <button type="button" data-cam="top" title="Straight down">top</button>
+      </div>
     </div>
 
+    <p class="viewnote" id="view-note"></p>
+
     <div class="stage-controls">
+      <!-- Three states, one control. A checkbox cannot express three, and two overlapping
+           checkboxes ("preview on/off" plus "animate") is exactly the ambiguity to avoid. -->
+      <fieldset class="seg tight" id="seg-source">
+        <legend class="sr">What the board shows</legend>
+        <span class="seg-t" aria-hidden="true">Showing</span>
+        <label class="chk" title="Mirror the frame the daemon is putting on the pad, read from GET /api/frame. Falls back to Preview, saying so, if no daemon answers."><input type="radio" name="view-source" value="device" checked> Device</label>
+        <label class="chk" title="This page's own animated simulation of the config being edited, unsaved changes included. Works with no daemon and no pad. Never the device."><input type="radio" name="view-source" value="preview"> Preview</label>
+        <label class="chk" title="Preview off: the configured base colours only — per-key colours, the underglow base and the status duties, with no effect and no animation."><input type="radio" name="view-source" value="off"> Off</label>
+      </fieldset>
+      <label class="chk" title="Draw the pad as a real 3D object — hand-written WebGL, no libraries. Clicking, arrow keys and Enter work exactly as in the flat view."><input type="checkbox" id="chk-3d"> 3D view</label>
       <label class="chk" title="Logical LED index — what profiles[*].keys[].index means. During an identify sweep the board switches to strip numbering."><input type="checkbox" id="chk-indices" checked> LED indices</label>
       <label class="chk"><input type="checkbox" id="chk-labels"> Key labels</label>
-      <label class="chk"><input type="checkbox" id="chk-anim" checked> Animate preview</label>
       <span class="spacer"></span>
       <label class="chk"><input type="checkbox" id="chk-live"> Live preview on device</label>
       <button id="btn-stop-preview" type="button" class="ghost small">Stop preview</button>

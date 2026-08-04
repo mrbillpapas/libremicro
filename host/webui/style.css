@@ -184,6 +184,7 @@ main {
 .stage-head h2 { margin-right: auto; }
 
 .deviceview {
+  position: relative;
   background:
     radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
     var(--bg-2);
@@ -191,12 +192,58 @@ main {
   border-radius: var(--r);
   padding: 8px;
 }
+/* The two device views share one box. In 2D the SVG is the whole thing. In 3D the canvas is what
+   you see and the SVG stays in the DOM as the KEYBOARD AND ACCESSIBILITY LAYER — a canvas has no
+   DOM to tab through, so the focusable, aria-labelled cells have to keep existing. It is made
+   invisible with `opacity: 0`, which (unlike `display:none` or `visibility:hidden`) leaves it
+   focusable and in the accessibility tree, and `pointer-events: none` hands the pointer to the
+   canvas, which does its own picking. Focus is drawn in the 3D scene instead. */
+.dv-stack { position: relative; }
 #device { display: block; width: 100%; height: auto; touch-action: manipulation; }
+#device3d { display: none; width: 100%; height: auto; touch-action: none; border-radius: 6px; }
+#device3d.orbiting { cursor: grabbing; }
+
+.deviceview[data-view="3d"] #device3d { display: block; }
+.deviceview[data-view="3d"] #device {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; pointer-events: none;
+}
+
+.dv-cam {
+  position: absolute; z-index: 2; right: 10px; bottom: 8px;
+  display: none; gap: 4px; align-items: center;
+}
+.deviceview[data-view="3d"] .dv-cam { display: flex; }
+.dv-cam button {
+  padding: 2px 8px; font-size: 11.5px; line-height: 1.5;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 1px solid var(--line); border-radius: 999px; color: var(--fg-dim);
+}
+.dv-cam button:hover { color: var(--fg); background: var(--bg-2); }
+.dv-cam .dv-hint { font-size: 11px; color: var(--fg-faint); margin-right: 4px; }
+
+/* Which source the board is showing. Sits on the board because that is the thing whose honesty is
+   in question — a caption three elements away is a caption people don't read. */
+.viewsrc {
+  position: absolute; z-index: 2; top: 12px; left: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px 3px 7px; border-radius: 999px;
+  font-size: 11.5px; letter-spacing: .01em;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+.viewsrc[data-mode="device"] { color: var(--fg); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.viewsrc[data-mode="preview"] { border-style: dashed; }
+.viewnote { margin: 7px 0 0; font-size: 12px; color: var(--fg-dim); min-height: 1.4em; }
 
 .stage-controls {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   margin-top: 10px; font-size: 12.5px;
 }
+.stage-controls .field.inline select { font-size: 12.5px; padding: 3px 6px; }
 .spacer { flex: 1 1 auto; }
 .stage-note { margin: 8px 0 0; font-size: 12px; color: var(--fg-dim); min-height: 1.4em; }
 
@@ -316,6 +363,9 @@ output { color: var(--fg); font-family: var(--mono); font-variant-numeric: tabul
 .chk input { accent-color: var(--accent); }
 .chk.boxed { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 10px; }
 fieldset.seg { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px 10px; display: flex; gap: 14px; flex-wrap: wrap; }
+/* The stage's own three-way source picker: same control, tighter, with a visible group label. */
+fieldset.seg.tight { padding: 2px 9px 3px; gap: 11px; align-items: center; margin: 0; }
+fieldset.seg.tight .seg-t { color: var(--fg-faint); font-size: 11.5px; }
 
 .subbox {
   border: 1px solid var(--line-soft); border-radius: var(--r);

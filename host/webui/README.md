@@ -32,6 +32,7 @@ edits only what the panels expose. Everything the schema defines except `watch` 
 | GET | `/api/schema` | fetched and kept for reference (not yet used for validation) |
 | GET | `/api/palettes` | built-in palette corpus; **replaces** the fallback set embedded in `app.js` |
 | GET | `/api/status` | status bar, polled every 3 s (8 s while unreachable). `keys` drives the keyboard-synthesis warning, `input_events` the event feed's empty state |
+| GET | `/api/frame` | **what the device view mirrors.** `{keys:[hex×13],underglow:[hex×8],status:[int×3],brightness:0-255,connected:bool}` — polled at up to `device.fps` (capped at ~18 Hz), 1.4 s when the board is off screen or Preview is pinned, 3 s when the tab is hidden, 2.5 s while unreachable |
 | POST | `/api/preview/frame` | `{keys:[hex×13],underglow:[hex×8],status:[int×3],ttl:6}` on colour edits, throttled to `device.fps`. `keys` is in **logical** order, `underglow` in **ring** order — see below |
 | POST | `/api/preview/effect` | `{effect:{…}}` on effect edits, debounced 140 ms |
 | POST | `/api/preview/stop` | `Stop preview`, and when a sweep ends |
@@ -45,6 +46,9 @@ edits only what the panels expose. Everything the schema defines except `watch` 
 
 Contract notes for whoever is writing the daemon side:
 
+- **The device view mirrors `/api/frame`; it does not re-render the effects.** This is the one
+  contract in the page that exists to stop a class of bug rather than to enable a feature. See the
+  next section.
 - **Live preview arbitration.** Colour/base edits push a *fully composited* frame (base layer +
   the client-rendered effect at the current animation time); effect edits hand rendering to the
   daemon via `/api/preview/effect`. A frame push after an effect push is therefore a deliberate
@@ -83,6 +87,132 @@ Contract notes for whoever is writing the daemon side:
   behave exactly as they will from hardware. The hold test uses `hold_s` so the key is genuinely
   held; past ~1.8 s (the daemon caps its own sleep at 2 s) the UI sends `key i down`, waits, and
   sends `key i up` itself.
+
+## The device view has three sources, and it always says which one you are looking at
+
+The board used to animate `app.js`'s own JavaScript re-implementation of the ten effects while the
+pad was being driven by [`effects.py`](../daemon/libremicro/effects.py) on the host. Two
+implementations of one animation cannot agree: different clock origin, different rounding,
+different idea of when a cycle started, different spread constants. They drifted, and the drift was
+invisible because the page claimed to be showing the device.
+
+**One three-way radio group** — `Showing: Device / Preview / Off` — now picks where the picture
+comes from, and a badge **on the board** always names it. There is deliberately no second
+"animate" checkbox: two overlapping switches whose difference nobody can state is how the original
+bug got to hide.
+
+| | **Device** | **Preview** | **Off** |
+|---|---|---|---|
+| Where the colours come from | `GET /api/frame` — the frame the daemon is putting on the pad *right now* | `computeFrame()` in this page | the config's base layer, `computeFrame()` with the effect suppressed |
+| What it includes | the real effect clock, idle dimming, flashes, pulses, the volume bar, whatever a preview has taken over | the config in the editor, **including unsaved edits**, animated | per-key colours, the underglow base colour, the status duties. No effect, no clock |
+| Needs | a daemon | nothing | nothing |
+| Badge says | "mirroring the device" / "mirroring the daemon · no device attached" | "preview · not the device" | "preview off · base colours only" |
+
+Nothing is recomputed in the Device path. The endpoint's `keys` array is indexed by **logical key**
+and `underglow` by **ring position** — the identities this page already uses for selection, config
+and `/api/preview/frame` — so the frame is read, not translated, and `brightness` (already including
+idle dimming) is the only thing applied on top. That is why it cannot drift: there is one
+implementation of the effects and this page is not it.
+
+- **The badge sits on the board**, not in a caption three elements away: solid green dot for a real
+  pad, amber for a daemon with nothing plugged in, dashed outline for either local source. A line
+  under the board says *why* in a sentence.
+- **`Device` degrades rather than lying.** With no daemon answering it falls back to the preview and
+  the badge says "preview", with the reason ("No daemon is answering, so Device is not available").
+  It never shows a simulation labelled as hardware.
+- **Designing with nothing plugged in still works, unchanged.** That is what `Preview` is for, and it
+  is why it was kept rather than deleted: no daemon, no pad, no config on disk, and the board still
+  animates the ten effects from the editor's own state.
+- **The mirror will honestly show you something you did not want**, and both cases are said in words
+  rather than left to be discovered: with **unsaved edits** the pad is still running the saved
+  config, so the note points at *Save*, *Live preview on device*, or *Preview*; and when the pad has
+  **idle-dimmed to brightness 0** the board goes dark, so the note says the LEDs are off and how to
+  get a picture back.
+- **Live preview closes the loop rather than fighting it.** With `Live preview on device` ticked the
+  pad is showing this page's design, so the mirror shows that design *on the hardware*. What gets
+  pushed is always the freshly computed local frame and never what is on screen — pushing a mirrored
+  frame back would be a feedback loop that ate the config's lighting one frame at a time, and
+  pushing an `Off` frame would silently drop the effect.
+- **Polling, backed off hard.** The daemon has no push channel and `/api/frame` composes a frame per
+  request, so the rate is capped by `device.fps` (and ~18 Hz regardless), and drops to 1.4 s when
+  the board is scrolled out of view (an `IntersectionObserver` — at 900 px the layout is one column,
+  so editing puts the board off screen for minutes) or when `Preview`/`Off` is selected, 3 s when
+  `document.hidden`, and 2.5 s with no daemon. Choosing a source, returning to the tab or scrolling
+  the board back kicks a poll immediately rather than waiting out the back-off. One request is in
+  flight at a time.
+
+## The 3D view
+
+`3D view` replaces the flat SVG with a real perspective render of the pad — an extruded board, 12
+keycap solids, the underglow as emissive strips around the rim, and the desk underneath — **written
+directly against the raw WebGL context in `app.js` (§9b)**: about 40 lines of matrix maths, two
+shaders as template strings, and meshes extruded from the same `buildGeometry()` output the flat view
+is drawn from. No three.js, no CDN, no npm, no build step. Drag to orbit, scroll to zoom, or take one
+of the `¾ / front / top` presets; the camera persists.
+
+**The LED colour is never touched, and that is the constraint the shading model is built around.**
+There is no white light in the scene at all:
+
+- a **cap's top face is emissive** — the fragment colour *is* the frame colour, byte for byte, the
+  same value the flat view puts in `fill`;
+- a **cap's side walls** are that same colour times a scalar, which is what a dimmer does and cannot
+  move a hue;
+- the **board and the desk** are a dark base plus the *additive* sum of the LEDs' own colours, so the
+  light spilling onto the surface beneath a cap is that cap's colour rather than a tint of it;
+- nothing adds white, nothing tone-maps, and the only texture is the index/label decal, which is an
+  alpha mask tinted by the same `inkFor()` luminance rule the flat view uses.
+
+Because the cap tops are emissive this is a *testable* claim, not a stylistic one: inject a known
+frame, read the pixels back out of the canvas, and every one of the 13 key colours and 8 underglow
+colours is there verbatim — at full brightness and at `brightness: 64`, where they appear as the
+frame colour times 64/255.
+
+**It stays operable, because the SVG is not replaced.** In 3D the SVG stays in the DOM as the
+keyboard and accessibility layer — `opacity: 0` (which, unlike `display:none` or
+`visibility:hidden`, keeps it focusable and in the accessibility tree) and `pointer-events: none`.
+Every `tabindex`, `role`, accessible name and arrow-key rule is the one that was already there, and
+a click in the canvas is dispatched *through* the matching SVG group so there is one activation path
+for both views.
+
+- **Pointer input is exact colour-buffer picking**: the scene is redrawn with each surface painted
+  with its own id, one pixel is read under the cursor, and the id maps straight back to a
+  zone/index. No ray-versus-box arithmetic to get subtly wrong, and it handles the two halves of the
+  wide keycap correctly for free. A drag past 4 px orbits instead of selecting.
+- **Focus is drawn in the scene.** The focusable element is an invisible SVG group, so a browser
+  focus ring would be invisible; a `focusin` listener records which LED has focus and the renderer
+  draws a ring on that cap. Selection, the bindings selection and input-event hits use the same ring
+  with the flat view's own colours and order of precedence (hit, then selection, then focus).
+- **Text stays upright and unforeshortened.** The index and label are a decal on the cap's top face,
+  drawn from a 13-cell canvas atlas rebuilt only when the text changes — not a tilted copy of the
+  whole board, which would squash exactly the numerals you aim by.
+- **The geometry is not a second layout.** Every position, size and identity comes from
+  `state.geom`; the only numbers §9b adds are heights (`GEO.z`) and the camera. The underglow shares
+  are sliced out of the perimeter by arc length with the same `d0` offset and the same slot numbering
+  the flat view's dash offsets use, so every share sits over the same corner or edge midpoint.
+- **One conversion, applied once.** SVG's y axis points *down*, so using it directly as a world axis
+  gives a left-handed space and a mirrored render. World y is minus SVG y, applied the moment a
+  coordinate enters the scene (`fy` / `FY`), and nothing downstream thinks about it again.
+- **It falls back rather than showing nothing.** No WebGL context, a shader that will not compile, or
+  a `webglcontextlost` mid-session all switch to the flat view, untick and disable the checkbox, and
+  say which of those happened in a toast. The stored preference is deliberately *not* overwritten, so
+  a reload tries again.
+
+### 2D is the default, and 3D is a toggle
+
+The judgement call, made deliberately: **the flat view is the default, `3D view` turns the render on,
+and the choice persists in `localStorage`.**
+
+The 3D view is the better *picture* — it is what shows what the pad will physically look like on a
+desk, including the light landing on the board around each cap. The flat view is the better
+*instrument*: it is what you aim at when binding keys and reading indices, its labels are always
+legible at any size, it needs no GPU, and it is the one that cannot fail. A studio's default should
+be the dependable instrument with the nicer picture one click away, not the other way round — and
+because the choice persists, anyone who prefers 3D sets it once and never thinks about it again.
+
+Two things pay down the cost of 3D rather than arguing it away: binding work has its own flat map in
+the Bindings tab, which is where aiming at a key to bind it actually happens; and the identify sweep
+— where "which position lit?" *is* the whole question — **forces the flat view for its duration**
+whatever the toggle says, and the panel says so.
 
 ## Bindings
 
@@ -358,10 +488,18 @@ gradient the device renders.
 
 ## Keyboard and accessibility
 
+- **The 3D view changes none of this.** The WebGL canvas is `aria-hidden` and the SVG below it stays
+  the focusable, aria-labelled layer — invisible via `opacity: 0` rather than `display:none`, so it
+  keeps its place in the tab order and the accessibility tree. Focus is drawn as a ring in the 3D
+  scene, since a browser focus ring on an invisible element would not be. A canvas click is
+  dispatched through the matching SVG group, so there is one activation path for both views. If
+  WebGL is unavailable the flat view is what you get, with a toast saying so.
 - Tab into the device view; every LED is a focusable button — and only LEDs are, so the encoder,
   joystick and touch pad ghosts are skipped entirely. Arrow keys move within a zone: across the 4×4
   key grid (stepping over the slots the non-key controls hold, and between the two halves of the
-  wide cap), around the underglow ring, up and down the status stack. Enter/Space selects (or
+  wide cap), around the underglow ring, up and down the status stack. The caps are in DOM order
+  0–12 (they used to start at the shared 10/11 pair), which matters more now that in 3D this layer
+  is the one nobody can see. Enter/Space selects (or
   records a position mid-sweep). Each LED's accessible name carries its row and grid column, its
   logical index, its strip index, and — for the wide cap — the index it shares a keycap with.
 - Tabs are a proper tablist: arrows, Home/End. Eight of them fit one row at 1280 px.

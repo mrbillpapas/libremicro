@@ -222,6 +222,20 @@ const GEO = {
   status: { w: 16, h: 12, gap: 5, r: 4, pad: 4, clear: 5 },
   noteY: [404],
   vbW: 400, vbH: 412,
+  /* Heights for the 3D view, in the same board units as everything above — the 3D scene is the
+   * SAME geometry extruded, never a second layout. See §9b. */
+  z: {
+    board: 9,          // board thickness
+    cap: 11,           // keycap height above the board's top surface
+    capTaper: 2.6,     // how much narrower the cap's top face is than its base
+    ug: 4.5,           // how far the underglow strip sits below the board's top surface
+    // How far the underglow strip stands out past the board outline. Enough that the rim is still
+    // a readable band from straight overhead, where the board itself hides everything inside it.
+    ugOut: 8,
+    status: 0.8,       // status LEDs are flush-ish
+    knob: 7,           // encoder / joystick body height
+    ground: 46,        // how far below the board the desk plane sits
+  },
 };
 
 /* ======================================================= 2. colour science */
@@ -514,6 +528,10 @@ const api = {
   getSchema: () => req('GET', '/api/schema'),
   getPalettes: () => req('GET', '/api/palettes'),
   getStatus: () => req('GET', '/api/status'),
+  // The frame the daemon is putting on the device RIGHT NOW: `keys` by logical index,
+  // `underglow` by ring position, `brightness` after idle dimming. This is what the device
+  // view mirrors instead of re-running the effects in JavaScript — see §10b.
+  getFrame: () => req('GET', '/api/frame'),
   previewFrame: (f) => req('POST', '/api/preview/frame', f),
   previewEffect: (e) => req('POST', '/api/preview/effect', { effect: e }),
   previewStop: () => req('POST', '/api/preview/stop'),
@@ -579,10 +597,30 @@ const state = {
   palStop: 0,
   geom: null,
   geomSig: '',
-  anim: { playing: true, t: 0, lastTs: 0, lastPaint: 0 },
+  // The preview clock. It advances only while a preview is on screen or live preview is streaming
+  // this page's frames, so a mirrored board costs nothing and an "Off" board is genuinely still.
+  anim: { t: 0, lastTs: 0, lastPaint: 0 },
   live: false,
   identify: { active: false, target: 'keys', index: 0, map: { keys: [], underglow: [] } },
-  lastFrame: null,
+
+  /* What the device view is showing and how it is drawn.
+   *
+   * `source` is the user's choice of WHERE the picture comes from — 'device', 'preview' or 'off'
+   * (see §10). `threeD` is only how it is drawn and changes no geometry. `onscreen` is set by an
+   * IntersectionObserver so a scrolled-away board stops asking the daemon for frames. `focusLed`
+   * tracks DOM focus inside the SVG so the 3D view can draw a focus ring for it, since in 3D the
+   * focusable element is the invisible SVG cell and not anything on the canvas. */
+  view: { source: 'device', threeD: false, onscreen: true, focusLed: null },
+  /* The last frame read from GET /api/frame, i.e. what is physically on the pad. Colours are
+   * kept as rgb triples exactly as the endpoint gave them (undimmed); `brightness` is applied
+   * when painting, so the raw values stay available for the accessible name and `data-hex`. */
+  mirror: {
+    keys: null, ug: null, status: null,
+    brightness: 255, connected: false,
+    at: 0, seq: 0, ok: false, error: null,
+  },
+  localFrame: null,              // last locally simulated frame — what live preview pushes
+  lastFrame: null,               // last frame actually painted, from either source
   jsonStale: true,
   previewChannel: null,          // which preview endpoint currently owns the device
   lastEffectPush: 0,
@@ -776,6 +814,28 @@ function assertBandTiling(pathEl, L, cells) {
   if (Math.abs(UG_COUNT * seg - L) > 1e-6) bad.push(`shares span ${(UG_COUNT * seg).toFixed(4)} of ${L.toFixed(4)}`);
   if (bad.length) console.warn('underglow perimeter band: ' + bad.join('; '));
   return !bad.length;
+}
+
+/** A rounded rectangle as a closed polyline, counter-clockwise in SVG coordinates. Used by the 3D
+ *  view for every extruded outline — board, keycaps, the underglow band centreline — so one
+ *  definition of "rounded rectangle" serves the whole scene. `seg` is segments per corner arc. */
+function roundedOutline(x, y, w, h, r, seg = 5) {
+  const rr = clamp(r, 0, Math.min(w, h) / 2);
+  const pts = [];
+  // corner centres, clockwise from the top-left, with the arc's start angle
+  const corners = [
+    [x + w - rr, y + rr, -Math.PI / 2],
+    [x + w - rr, y + h - rr, 0],
+    [x + rr, y + h - rr, Math.PI / 2],
+    [x + rr, y + rr, Math.PI],
+  ];
+  for (const [cx, cy, a0] of corners) {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (i / seg) * (Math.PI / 2);
+      pts.push([cx + rr * Math.cos(a), cy + rr * Math.sin(a)]);
+    }
+  }
+  return pts;
 }
 
 function buildGeometry() {
@@ -1043,13 +1103,16 @@ function effectColor(eff, cp, led, t, zoneSeed) {
   }
 }
 
-/** Composite base layer + effect layer into per-strip-index colours. */
-function computeFrame(t) {
+/** Composite base layer + effect layer into per-strip-index colours.
+ *
+ *  `withEffect: false` is the "Off" state of the source picker: the configured BASE layer only —
+ *  per-key colours, the underglow base colour, the status duties — with no effect and no clock. */
+function computeFrame(t, withEffect = true) {
   const geom = state.geom || buildGeometry();
   // What the pad would actually show in the scope being edited: a mode's lighting overrides the
   // profile's key by key, and its key colours layer over the profile's.
   const light = effectiveLighting();
-  const eff = light.effect && light.effect.name ? light.effect : null;
+  const eff = withEffect && light.effect && light.effect.name ? light.effect : null;
   const cp = eff ? (compiledPalette(eff.palette) || compiledPalette('rainbow')) : null;
 
   const baseKeys = geom.keys.map((k) => {
@@ -1068,7 +1131,9 @@ function computeFrame(t) {
 
   const duty = Array.isArray(light.status_leds) ? light.status_leds : [];
   const status = [0, 1, 2].map((i) => clamp(Math.round(Number(duty[i]) || 0), 0, 255));
-  return { keys, ug, status };
+  // `source` and `dim` say what this frame IS, so paint() need not know which path produced it.
+  // A simulated frame carries no brightness: it is a drawing of a config, not a reading of a pad.
+  return { keys, ug, status, dim: 1, source: eff ? 'preview' : 'off' };
 }
 
 const frameToWire = (f) => ({
@@ -1198,10 +1263,16 @@ function buildDevice() {
     svgRefs.feat.set(f.kind, { g, cell: f });
   }
 
-  // Keycaps. One group per LED, but a shared cap is drawn as a single wide rounded cap: the
-  // regions carry their own colour and their own selection, and a hairline seam plus the shared
-  // index label say they are one control.
-  for (const cap of geom.caps) {
+  /* Keycaps. One group per LED, but a shared cap is drawn as a single wide rounded cap: the
+   * regions carry their own colour and their own selection, and a hairline seam plus the shared
+   * index label say they are one control.
+   *
+   * Drawn in grid-row order rather than geom.caps order. geom.caps lists the shared cap first, so
+   * the old DOM order made the tab sequence 10, 11, 0, 1 … 12; row order makes it 0…12. That
+   * matters more than it used to: in the 3D view this SVG is the keyboard layer and nobody can see
+   * it, so its traversal order has to match the layout it stands for. */
+  const drawCaps = geom.caps.slice().sort((a, b) => a.cells[0].row - b.cells[0].row);
+  for (const cap of drawCaps) {
     if (cap.shared) {
       svg.append(svgEl('rect', {
         class: 'cap-shell', x: cap.x, y: cap.y, width: cap.w, height: cap.h, rx: GEO.key.r,
@@ -1255,6 +1326,961 @@ function buildDevice() {
     svg.append(t);
   }
 }
+
+/* ================================================ 9b. the 3D view (WebGL)
+ *
+ * A real perspective render of the pad, hand-written against the raw WebGL context: a few dozen
+ * lines of matrix maths, two shaders as template strings, and meshes extruded from the SAME
+ * buildGeometry() output the flat SVG is drawn from. No three.js, no CDN, no build step — those
+ * were never available here and the geometry is not hard enough to need them.
+ *
+ * Three things constrain the design more than looks do.
+ *
+ * 1. THE LED COLOUR IS THE DATA, so nothing is allowed to shift it. There is no white light in
+ *    this scene at all. A cap's top face is *emissive*: the fragment colour is the frame colour,
+ *    byte for byte, exactly as the flat view's `fill` is — you can read a pixel out of the canvas
+ *    and get the hex back. A cap's side walls are that same colour times a scalar, which is what a
+ *    dimmer does and cannot move a hue. The board and the desk are a dark base plus the ADDITIVE
+ *    sum of the LEDs' own colours, so the light spilling onto the surface underneath is the LED's
+ *    colour rather than a tint of it. Nothing anywhere adds white or tone-maps.
+ *
+ * 2. IT MUST STAY OPERABLE. The SVG is not replaced: in 3D it stays in the DOM as the keyboard and
+ *    accessibility layer (invisible, `pointer-events: none`) and keeps every tabindex, role, arrow
+ *    key and accessible name. Focus is drawn into the 3D scene so it is visible. The pointer is
+ *    handled by exact colour-buffer picking, so clicking a cap selects that cap.
+ *
+ * 3. IT MUST NOT BECOME A SECOND GEOMETRY. Every position, size and identity comes from
+ *    `state.geom`; the only numbers this section adds are heights (GEO.z) and the camera.
+ */
+
+/* ---------------------------------------------------------------- 4x4 matrices */
+
+const M4 = {
+  perspective(fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
+  },
+  lookAt(eye, at, up) {
+    const z = V3.norm(V3.sub(eye, at));
+    const x = V3.norm(V3.cross(up, z));
+    const y = V3.cross(z, x);
+    return [
+      x[0], y[0], z[0], 0,
+      x[1], y[1], z[1], 0,
+      x[2], y[2], z[2], 0,
+      -V3.dot(x, eye), -V3.dot(y, eye), -V3.dot(z, eye), 1,
+    ];
+  },
+  mul(a, b) {                                   // a * b, both column-major
+    const o = new Array(16).fill(0);
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k];
+        o[c * 4 + r] = s;
+      }
+    }
+    return o;
+  },
+};
+
+const V3 = {
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  mul: (a, k) => [a[0] * k, a[1] * k, a[2] * k],
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  norm: (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+};
+
+/* ------------------------------------------------------------- mesh building */
+
+const meshNew = () => ({ pos: [], nrm: [], uv: [] });
+
+/* SVG's y axis points DOWN, so using it as a world axis with z up gives a left-handed space and
+ * every render comes out mirrored — including the text on the keycaps. So there is exactly one
+ * conversion, applied the moment a coordinate enters the scene: world y is minus SVG y. `FY` flips
+ * a whole outline, `fy` a single value. Nothing downstream needs to think about it again. */
+const fy = (y) => -y;
+const FY = (pts) => pts.map((p) => [p[0], -p[1]]);
+
+function meshTri(m, a, b, c, n, uv) {
+  m.pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+  for (let i = 0; i < 3; i++) m.nrm.push(n[0], n[1], n[2]);
+  if (uv) m.uv.push(uv[0][0], uv[0][1], uv[1][0], uv[1][1], uv[2][0], uv[2][1]);
+  else m.uv.push(0, 0, 0, 0, 0, 0);
+}
+
+function meshQuad(m, a, b, c, d, n, uv) {
+  meshTri(m, a, b, c, n, uv && [uv[0], uv[1], uv[2]]);
+  meshTri(m, a, c, d, n, uv && [uv[0], uv[2], uv[3]]);
+}
+
+const faceNormal = (a, b, c) => V3.norm(V3.cross(V3.sub(b, a), V3.sub(c, a)));
+
+/** Fill a convex polygon at height z, as a fan from its centroid. Every polygon in this scene is
+ *  a rounded rectangle or a straight-line clip of one, so a centroid fan is exact. */
+function meshFillPoly(m, poly, z, nz) {
+  if (poly.length < 3) return;
+  let cx = 0, cy = 0;
+  for (const p of poly) { cx += p[0]; cy += p[1]; }
+  cx /= poly.length; cy /= poly.length;
+  const n = [0, 0, nz];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    meshTri(m, [cx, cy, z], [a[0], a[1], z], [b[0], b[1], z], n);
+  }
+}
+
+/** Walls between two aligned outlines at two heights. `skipAt` drops edges whose midpoint x is at
+ *  that value — the vertical cut a shared keycap's seam introduces is interior, not a wall. */
+function meshWalls(m, lo, zLo, hi, zHi, skipAt) {
+  const n = lo.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    if (skipAt !== undefined && Math.abs((lo[i][0] + lo[j][0]) / 2 - skipAt) < 0.01) continue;
+    const a = [lo[i][0], lo[i][1], zLo], b = [lo[j][0], lo[j][1], zLo];
+    const c = [hi[j][0], hi[j][1], zHi], d = [hi[i][0], hi[i][1], zHi];
+    meshQuad(m, a, b, c, d, faceNormal(a, b, c));
+  }
+}
+
+/** A ring lying just inside a closed polygon: one quad per edge, stepped inward along that edge's
+ *  own normal. Works for any polygon, including the clipped halves of the shared keycap — which a
+ *  ring built between two independently generated outlines does not, because clipping the two does
+ *  not always leave them with the same number of points. */
+function meshRing(m, poly, z, width) {
+  if (poly.length < 3) return;
+  let cx = 0, cy = 0;
+  for (const q of poly) { cx += q[0]; cy += q[1]; }
+  cx /= poly.length; cy /= poly.length;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    let nx = -(b[1] - a[1]), ny = b[0] - a[0];
+    const l = Math.hypot(nx, ny) || 1;
+    nx /= l; ny /= l;
+    // point the normal inward
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    if ((cx - mx) * nx + (cy - my) * ny < 0) { nx = -nx; ny = -ny; }
+    meshQuad(m, [a[0], a[1], z], [b[0], b[1], z],
+      [b[0] + nx * width, b[1] + ny * width, z], [a[0] + nx * width, a[1] + ny * width, z], [0, 0, 1]);
+  }
+}
+
+/** Sutherland–Hodgman clip of a closed polygon against a vertical line. */
+function clipPolyX(poly, xCut, keepLess) {
+  const inside = (p) => (keepLess ? p[0] <= xCut : p[0] >= xCut);
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const ia = inside(a), ib = inside(b);
+    if (ia) out.push(a);
+    if (ia !== ib) {
+      const t = (xCut - a[0]) / (b[0] - a[0]);
+      out.push([xCut, a[1] + (b[1] - a[1]) * t]);
+    }
+  }
+  return out;
+}
+
+function meshCylinder(m, cx, cy, r, z0, z1, seg = 20) {
+  const ring = [];
+  for (let i = 0; i < seg; i++) {
+    const a = (i / seg) * Math.PI * 2;
+    ring.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+  }
+  meshWalls(m, ring, z0, ring, z1);
+  meshFillPoly(m, ring, z1, 1);
+  return m;
+}
+
+/* --------------------------------------------------- the underglow perimeter
+ *
+ * The eight shares are sliced out of the perimeter by ARC LENGTH, with the same start offset and
+ * the same slot numbering the SVG's dash offsets use (see ugBandGeom): `d0` puts a share BOUNDARY
+ * a sixteenth of the perimeter before ring position 0, and ring i owns slot (i+7) mod 8. That
+ * relation holds for any rounded square, so applying it to the board's own outline — where the
+ * light physically leaves the board — puts every share over the same corner or edge midpoint the
+ * flat view puts it on. Identity comes from geom, only the radius differs. */
+function bandSlices(x, y, w, h, r, seg = 10) {
+  const straight = w - 2 * r;
+  const d0 = clamp(straight / 4 - (Math.PI * r) / 8, 0, straight);
+  // Dense polyline starting at the same point as the SVG path: (x + r + d0, y), running clockwise.
+  const pts = [[x + r + d0, y]];
+  const push = (px, py) => pts.push([px, py]);
+  const arc = (ccx, ccy, a0) => {
+    for (let i = 1; i <= seg; i++) {
+      const a = a0 + (i / seg) * (Math.PI / 2);
+      push(ccx + r * Math.cos(a), ccy + r * Math.sin(a));
+    }
+  };
+  push(x + w - r, y); arc(x + w - r, y + r, -Math.PI / 2);
+  push(x + w, y + h - r); arc(x + w - r, y + h - r, 0);
+  push(x + r, y + h); arc(x + r, y + h - r, Math.PI / 2);
+  push(x, y + r); arc(x + r, y + r, Math.PI);
+  push(x + r + d0, y);
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  }
+  const L = cum[cum.length - 1];
+  const at = (s) => {
+    s = clamp(s, 0, L);
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < s) i++;
+    const t = (s - cum[i - 1]) / Math.max(1e-6, cum[i] - cum[i - 1]);
+    return [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t];
+  };
+  return {
+    L,
+    /** The polyline for one eighth of the perimeter, resampled so corners stay smooth. */
+    slice(slot, n = 14) {
+      const s0 = (slot * L) / UG_COUNT, s1 = ((slot + 1) * L) / UG_COUNT;
+      const out = [];
+      for (let i = 0; i <= n; i++) out.push(at(s0 + ((s1 - s0) * i) / n));
+      return out;
+    },
+    centre(slot) { return at(((slot + 0.5) * L) / UG_COUNT); },
+  };
+}
+
+/* ------------------------------------------------------------------- shaders */
+
+const V3D_VERT = `
+attribute vec3 aPos;
+attribute vec3 aNrm;
+attribute vec2 aUv;
+uniform mat4 uMvp;
+varying vec3 vWorld;
+varying vec3 vNrm;
+varying vec2 vUv;
+void main() {
+  vWorld = aPos;
+  vNrm = aNrm;
+  vUv = aUv;
+  gl_Position = uMvp * vec4(aPos, 1.0);
+}`;
+
+/* uMode
+ *   0  emissive        gl_FragColor = uColor.  The frame colour, untouched. Cap tops, underglow
+ *                      strips, status LEDs, focus/selection rings.
+ *   1  self-lit solid  uColor * scalar(face).  A keycap's side walls: the same light running down
+ *                      the side of the cap. A scalar cannot move a hue.
+ *   2  surface         uBase * shade + additive sum of the LEDs' OWN colours. The board and the
+ *                      desk, so the spill under a cap is that cap's colour.
+ *   3  decal           a text glyph as an alpha mask, tinted by uColor. Never carries LED data.
+ */
+const V3D_FRAG = `
+precision highp float;
+varying vec3 vWorld;
+varying vec3 vNrm;
+varying vec2 vUv;
+uniform int uMode;
+uniform vec3 uColor;
+uniform vec3 uBase;
+uniform float uSpill;
+uniform vec4 uLpos[21];
+uniform vec3 uLcol[21];
+uniform sampler2D uTex;
+
+void main() {
+  if (uMode == 0) {
+    gl_FragColor = vec4(uColor, 1.0);
+    return;
+  }
+  if (uMode == 3) {
+    float a = texture2D(uTex, vUv).a;
+    gl_FragColor = vec4(uColor, a);
+    return;
+  }
+  vec3 n = normalize(vNrm);
+  float up = abs(n.z);
+  if (uMode == 1) {
+    gl_FragColor = vec4(uColor * (0.34 + 0.30 * up), 1.0);
+    return;
+  }
+  vec3 spill = vec3(0.0);
+  for (int i = 0; i < 21; i++) {
+    vec3 d = uLpos[i].xyz - vWorld;
+    float dist = length(d);
+    float k = dist / uLpos[i].w;
+    float att = 1.0 / (1.0 + k * k * 2.2);
+    // Wrapped rather than a hard cosine: an LED sits only millimetres above the plate, so a strict
+    // dot() term drives the spill between the caps — the part you can actually see — to nothing.
+    float nl = mix(0.12, 1.0, max(0.0, dot(n, d / max(dist, 0.001))));
+    spill += uLcol[i] * att * nl;
+  }
+  gl_FragColor = vec4(uBase * (0.55 + 0.45 * up) + spill * uSpill, 1.0);
+}`;
+
+/* --------------------------------------------------------------- the renderer */
+
+const R3 = {
+  canvas: null, gl: null, prog: null, loc: null,
+  objects: [],            // {buf, count, mode, pick, zone, index, kind, base, spill}
+  lightPos: null,         // Float32Array(21*4)
+  lightCol: null,         // Float32Array(21*3)
+  sig: '',
+  tex: null, texSig: '',
+  failed: false,          // no WebGL, or the context was lost
+  reason: '',
+  hover: null,
+  /* `zoom` is a multiplier on a distance computed to FIT the board to whichever canvas dimension
+   * is tighter — see camMatrix(). A fixed distance would frame the pad differently at every
+   * viewport width, and this page is laid out in two columns above 1100 px and one below. */
+  cam: { yaw: -0.62, pitch: 0.60, zoom: 1 },
+  drag: null,
+  theme: null,
+};
+
+const CAM_PRESETS = {
+  three: { yaw: -0.62, pitch: 0.60, zoom: 1 },
+  front: { yaw: 0, pitch: 0.30, zoom: 1 },
+  top: { yaw: 0, pitch: 1.5533, zoom: 1 },
+};
+const FOV_Y = 0.62;
+
+/** Theme colours the scene needs, read from CSS so the 3D view follows the page's theme. */
+function themeColors() {
+  const cs = getComputedStyle(document.body);
+  const get = (v, dflt) => {
+    const raw = cs.getPropertyValue(v).trim();
+    return isHex6(raw.replace('#', '')) ? hexToRgb(raw) : hexToRgb(dflt);
+  };
+  return {
+    board: get('--bg-3', '222834'),
+    ground: get('--bg', '0d1015'),
+    ink: get('--fg', 'e7eaf0'),
+    faint: get('--fg-faint', '6b7480'),
+    accent: get('--accent', '7aa2f7'),
+    ok: get('--ok', '6ee7a8'),
+    warn: get('--warn', 'ffcc66'),
+  };
+}
+
+function glCompile(gl, type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || 'shader failed');
+  return s;
+}
+
+function gl3dInit() {
+  if (R3.gl || R3.failed) return !R3.failed;
+  const canvas = $('device3d');
+  let gl = null;
+  try {
+    // preserveDrawingBuffer so the canvas stays readable after the frame — that is what lets the
+    // rendered pixels be checked against /api/frame, and what makes a right-click Save Image work.
+    const opts = { alpha: false, antialias: true, depth: true, premultipliedAlpha: false, preserveDrawingBuffer: true };
+    gl = canvas.getContext('webgl', opts) || canvas.getContext('experimental-webgl', opts);
+  } catch { gl = null; }
+  if (!gl) {
+    R3.failed = true;
+    R3.reason = 'this browser gives no WebGL context';
+    return false;
+  }
+  try {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, glCompile(gl, gl.VERTEX_SHADER, V3D_VERT));
+    gl.attachShader(prog, glCompile(gl, gl.FRAGMENT_SHADER, V3D_FRAG));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link failed');
+    R3.prog = prog;
+    R3.loc = {
+      aPos: gl.getAttribLocation(prog, 'aPos'),
+      aNrm: gl.getAttribLocation(prog, 'aNrm'),
+      aUv: gl.getAttribLocation(prog, 'aUv'),
+      uMvp: gl.getUniformLocation(prog, 'uMvp'),
+      uMode: gl.getUniformLocation(prog, 'uMode'),
+      uColor: gl.getUniformLocation(prog, 'uColor'),
+      uBase: gl.getUniformLocation(prog, 'uBase'),
+      uSpill: gl.getUniformLocation(prog, 'uSpill'),
+      uLpos: gl.getUniformLocation(prog, 'uLpos[0]'),
+      uLcol: gl.getUniformLocation(prog, 'uLcol[0]'),
+      uTex: gl.getUniformLocation(prog, 'uTex'),
+    };
+  } catch (e) {
+    R3.failed = true;
+    R3.reason = 'the shaders would not compile here (' + String(e.message || e).slice(0, 60) + ')';
+    return false;
+  }
+  R3.canvas = canvas;
+  R3.gl = gl;
+  R3.lightPos = new Float32Array(21 * 4);
+  R3.lightCol = new Float32Array(21 * 3);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);      // the SVG's y-down space makes winding awkward; two-sided shading
+  gl.clearColor(0, 0, 0, 1);     // instead, so culling buys nothing here
+
+  // A lost context is not a crash: drop back to the flat view and say why.
+  canvas.addEventListener('webglcontextlost', (ev) => {
+    ev.preventDefault();
+    R3.failed = true;
+    R3.reason = 'the browser dropped the WebGL context';
+    R3.gl = null;
+    fall2d();
+  });
+  wire3dPointer(canvas);
+  return true;
+}
+
+/** Give up on 3D and show the flat view, saying why.
+ *
+ *  Silence would be the wrong answer twice over: the box stays ticked while nothing happens, and
+ *  the reason (no context, a refused shader, a GPU reset) is only in the console. The stored
+ *  preference is deliberately NOT overwritten — a lost context should not un-choose 3D for good,
+ *  so a reload tries again. */
+function fall2d() {
+  const first = !R3.told;
+  R3.told = true;
+  state.view.threeD = false;
+  R3.failed = true;
+  $('chk-3d').checked = false;
+  $('chk-3d').disabled = true;
+  $('chk-3d').closest('.chk').title = '3D view unavailable here — ' + (R3.reason || 'no WebGL');
+  // Set the attribute directly rather than re-entering applyViewMode, which called this.
+  const host = document.querySelector('.deviceview');
+  if (host) host.dataset.view = '2d';
+  renderViewSource();
+  if (first) toast('3D view unavailable — ' + (R3.reason || 'no WebGL') + '. Showing the flat view, which does everything the 3D one does.', 'warn', 7000);
+}
+
+/* -------------------------------------------------------------- scene assembly */
+
+function glBuffer(gl, mesh) {
+  const n = mesh.pos.length / 3;
+  const data = new Float32Array(n * 8);
+  for (let i = 0; i < n; i++) {
+    data[i * 8 + 0] = mesh.pos[i * 3];
+    data[i * 8 + 1] = mesh.pos[i * 3 + 1];
+    data[i * 8 + 2] = mesh.pos[i * 3 + 2];
+    data[i * 8 + 3] = mesh.nrm[i * 3];
+    data[i * 8 + 4] = mesh.nrm[i * 3 + 1];
+    data[i * 8 + 5] = mesh.nrm[i * 3 + 2];
+    data[i * 8 + 6] = mesh.uv[i * 2];
+    data[i * 8 + 7] = mesh.uv[i * 2 + 1];
+  }
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  return { buf, count: n };
+}
+
+/** Build the whole scene from state.geom. Runs once per geometry change, never per frame. */
+function build3dScene() {
+  const gl = R3.gl;
+  const geom = state.geom || buildGeometry();
+  const sig = state.geomSig + '|' + geom.cells.length;
+  if (sig === R3.sig && R3.objects.length) return;
+  for (const o of R3.objects) gl.deleteBuffer(o.buf);
+  R3.objects = [];
+  R3.sig = sig;
+
+  const Z = GEO.z, B = GEO.board;
+  const add = (mesh, o) => {
+    if (!mesh.pos.length) return null;
+    const b = glBuffer(gl, mesh);
+    const obj = { ...o, buf: b.buf, count: b.count };
+    R3.objects.push(obj);
+    return obj;
+  };
+
+  /* The desk. It exists so the underglow has something to land on — which is the whole point of
+   * underglow, and is invisible without a surface below the board. */
+  {
+    const m = meshNew();
+    const pad = 950, z = -Z.ground;   // large enough that the desk always fills the frame
+    meshQuad(m, [B.x - pad, fy(B.y - pad), z], [B.x + B.w + pad, fy(B.y - pad), z],
+      [B.x + B.w + pad, fy(B.y + B.h + pad), z], [B.x - pad, fy(B.y + B.h + pad), z], [0, 0, 1]);
+    add(m, { kind: 'ground', mode: 2, baseKey: 'ground', spill: 0.22 });
+  }
+
+  // The board: one extruded rounded rectangle.
+  {
+    const m = meshNew();
+    const outline = FY(roundedOutline(B.x, B.y, B.w, B.h, B.r, 8));
+    meshWalls(m, outline, 0, outline, Z.board);
+    meshFillPoly(m, outline, Z.board, 1);
+    meshFillPoly(m, outline, 0, -1);
+    add(m, { kind: 'board', mode: 2, baseKey: 'board', spill: 0.62 });
+  }
+
+  /* Underglow: eight emissive shares around the board's vertical edge, standing slightly proud of
+   * it so the light reads as leaving the board rather than being painted on it. */
+  const band = bandSlices(B.x, B.y, B.w, B.h, B.r, 10);
+  for (const cell of geom.ugCells) {
+    const line = FY(band.slice(cell.ringSlot, 16));
+    const m = meshNew();
+    const zTop = Z.board - Z.ug, zBot = zTop - GEO.ug.thick * 0.45;
+    // Push each sample outward along its own outward normal, so corners stay square to the edge.
+    const bcx = B.x + B.w / 2, bcy = fy(B.y + B.h / 2);
+    const outer = line.map(([px, py]) => {
+      const n = V3.norm([px - bcx, py - bcy, 0]);
+      return [px + n[0] * Z.ugOut, py + n[1] * Z.ugOut];
+    });
+    for (let i = 0; i < line.length - 1; i++) {
+      const a = [line[i][0], line[i][1], zTop], b = [line[i + 1][0], line[i + 1][1], zTop];
+      const c = [outer[i + 1][0], outer[i + 1][1], zBot], d = [outer[i][0], outer[i][1], zBot];
+      meshQuad(m, a, b, c, d, faceNormal(a, b, c));
+    }
+    add(m, { kind: 'ug', mode: 0, zone: 'underglow', index: cell.ring, pick: true });
+
+    /* A share is clickable, so selecting or focusing one has to be visible. Its own stroke carries
+     * the LED colour and cannot also carry a highlight — same problem the flat view solves with a
+     * wider sibling path — so this is a thin rail sitting just outside it, drawn only when needed. */
+    const rail = meshNew();
+    const far = line.map(([px, py], i) => {
+      const n = V3.norm([outer[i][0] - px, outer[i][1] - py, 0]);
+      return [outer[i][0] + n[0] * 4.5, outer[i][1] + n[1] * 4.5];
+    });
+    for (let i = 0; i < line.length - 1; i++) {
+      const a = [outer[i][0], outer[i][1], zBot], b = [outer[i + 1][0], outer[i + 1][1], zBot];
+      const c = [far[i + 1][0], far[i + 1][1], zBot], d = [far[i][0], far[i][1], zBot];
+      meshQuad(rail, a, b, c, d, [0, 0, 1]);
+    }
+    add(rail, { kind: 'ring', mode: 0, zone: 'underglow', index: cell.ring });
+  }
+
+  /* Keycaps. One rounded frustum per physical cap — narrower at the top, as a keycap is — with the
+   * TOP FACE split per LED for the shared cap, exactly as the flat view splits it. Walls and top
+   * are separate objects because they shade differently: the top is the colour, the wall is the
+   * colour dimmed. */
+  for (const cap of geom.caps) {
+    const t = Z.capTaper;
+    const base = FY(roundedOutline(cap.x, cap.y, cap.w, cap.h, GEO.key.r, 5));
+    const top = FY(roundedOutline(cap.x + t, cap.y + t, cap.w - 2 * t, cap.h - 2 * t, Math.max(1, GEO.key.r - t * 0.4), 5));
+    const zLo = Z.board, zHi = Z.board + Z.cap;
+    for (const c of cap.cells) {
+      const seam = cap.shared ? (c.capIndex === 0 ? c.hx1 : c.hx0) : undefined;
+      const keepLess = cap.shared ? c.capIndex === 0 : true;
+      const bp = cap.shared ? clipPolyX(base, seam, keepLess) : base;
+      const tp = cap.shared ? clipPolyX(top, seam, keepLess) : top;
+      const zone = 'keys', index = indexAtPos('keys', `${c.row},${c.col}`);
+
+      const wall = meshNew();
+      meshWalls(wall, bp, zLo, tp, zHi, cap.shared ? seam : undefined);
+      add(wall, { kind: 'capWall', mode: 1, zone, index, pick: true });
+
+      const face = meshNew();
+      meshFillPoly(face, tp, zHi, 1);
+      add(face, { kind: 'capTop', mode: 0, zone, index, pick: true });
+
+      // The index / label decal, as a quad over the cap's own top face.
+      const dw = Math.min(30, cap.w * 0.62), dh = 24;
+      if (tp.length && index !== null) {
+        const dcx = cap.shared ? (c.hx0 + c.hx1) / 2 : cap.x + cap.w / 2;
+        const dcy = fy(cap.y + cap.h / 2);
+        const dm = meshNew();
+        const u0 = index / KEY_COUNT, u1 = (index + 1) / KEY_COUNT;
+        // The atlas cell's row 0 is its top, and after the y flip larger world y is up on screen,
+        // so the top edge of the quad (dcy + dh/2) takes v = 0.
+        meshQuad(dm,
+          [dcx - dw / 2, dcy + dh / 2, zHi + 0.06], [dcx + dw / 2, dcy + dh / 2, zHi + 0.06],
+          [dcx + dw / 2, dcy - dh / 2, zHi + 0.06], [dcx - dw / 2, dcy - dh / 2, zHi + 0.06],
+          [0, 0, 1], [[u0, 0], [u1, 0], [u1, 1], [u0, 1]]);
+        add(dm, { kind: 'decal', mode: 3, zone, index });
+      }
+
+      /* A ring just above the cap's top face, drawn only when this LED is focused, selected or has
+       * just fired an event — the 3D stand-in for the SVG's stroke, and how focus stays visible
+       * when the focusable element itself is the invisible SVG underneath. */
+      const ring = meshNew();
+      meshRing(ring, tp, zHi + 0.1, 2.6);
+      add(ring, { kind: 'ring', mode: 0, zone, index });
+    }
+    if (cap.shared) {
+      // The hairline that says "one keycap, two LEDs" — the two halves are often near-identical.
+      for (const c of cap.cells.slice(1)) {
+        const m = meshNew();
+        const z = Z.board + Z.cap + 0.04;
+        const y0 = fy(cap.y + Z.capTaper + 3), y1 = fy(cap.y + cap.h - Z.capTaper - 3);
+        meshQuad(m, [c.hx0 - 0.35, y0, z], [c.hx0 + 0.35, y0, z],
+          [c.hx0 + 0.35, y1, z], [c.hx0 - 0.35, y1, z], [0, 0, 1]);
+        add(m, { kind: 'seam', mode: 0, colorKey: 'faint' });
+      }
+    }
+  }
+
+  // The three status LEDs: small emissive plates sitting on the board's surface.
+  for (const c of geom.statusCells) {
+    const m = meshNew();
+    const o = FY(roundedOutline(c.x, c.y, c.w, c.h, GEO.status.r, 3));
+    meshWalls(m, o, Z.board, o, Z.board + Z.status);
+    meshFillPoly(m, o, Z.board + Z.status, 1);
+    add(m, { kind: 'status', mode: 0, zone: 'status', index: c.i, pick: true });
+  }
+
+  /* The non-key controls, as solids rather than glyphs — an encoder that is a knob you can see the
+   * side of is more use for orientation than an outline of one. None of them carries an LED. */
+  for (const f of geom.featureCells) {
+    const m = meshNew();
+    const r = Math.min(f.w, f.h) / 2 - 6;
+    const fcy = fy(f.cy);
+    if (f.kind === 'encoder') {
+      meshCylinder(m, f.cx, fcy, r, Z.board, Z.board + Z.knob);
+      meshCylinder(m, f.cx, fcy, r * 0.42, Z.board + Z.knob, Z.board + Z.knob + 1.2);
+    } else if (f.kind === 'joystick') {
+      meshCylinder(m, f.cx, fcy, r, Z.board, Z.board + 2.2);
+      meshCylinder(m, f.cx, fcy, r * 0.4, Z.board + 2.2, Z.board + Z.knob);
+    } else {
+      const pad = f.padLeft || 0;
+      const bx = f.x + pad + 4, bw = Math.max(14, f.w - pad - 8);
+      const o = FY(roundedOutline(bx, f.cy - 13, bw, 26, 7, 4));
+      meshWalls(m, o, Z.board, o, Z.board + 0.8);
+      meshFillPoly(m, o, Z.board + 0.8, 1);
+    }
+    add(m, { kind: 'feat', mode: 1, feat: f.kind, pick: true, colorKey: 'faint' });
+  }
+
+  // Light positions: 13 keys at their cap tops, 8 underglow at their share centres under the rim.
+  for (const k of geom.keys) {
+    const c = k.cell;
+    const i = k.index;
+    if (i >= KEY_COUNT) break;
+    R3.lightPos[i * 4 + 0] = c ? c.cx : B.x + B.w / 2;
+    R3.lightPos[i * 4 + 1] = fy(c ? c.cy : B.y + B.h / 2);
+    R3.lightPos[i * 4 + 2] = Z.board + Z.cap * 0.85;
+    R3.lightPos[i * 4 + 3] = 34;                       // spill radius: local to the cap
+  }
+  geom.ugCells.forEach((cell, ring) => {
+    const [px, py] = band.centre(cell.ringSlot);
+    const i = KEY_COUNT + ring;
+    R3.lightPos[i * 4 + 0] = px;
+    R3.lightPos[i * 4 + 1] = fy(py);
+    R3.lightPos[i * 4 + 2] = Z.board - Z.ug;
+    R3.lightPos[i * 4 + 3] = 95;
+  });
+}
+
+/* ---------------------------------------------------- the keycap text atlas */
+
+/** One texture, 13 cells wide, each carrying what that cap should say. Rebuilt only when the text
+ *  changes, so the common case costs nothing. Mirrors what paint() writes into the SVG. */
+function ensureAtlas(labels) {
+  const gl = R3.gl;
+  const sig = labels.join(' ');
+  if (R3.tex && sig === R3.texSig) return R3.tex;
+  R3.texSig = sig;
+  const CW = 128, CH = 128;
+  const cv = document.createElement('canvas');
+  cv.width = CW * KEY_COUNT;
+  cv.height = CH;
+  const cx = cv.getContext('2d');
+  cx.clearRect(0, 0, cv.width, cv.height);
+  cx.fillStyle = '#fff';
+  cx.textAlign = 'center';
+  for (let i = 0; i < KEY_COUNT; i++) {
+    const [idx, lab] = (labels[i] || ' ').split('');
+    const x = i * CW + CW / 2;
+    if (idx) {
+      cx.font = '600 52px ui-monospace, Menlo, monospace';
+      cx.textBaseline = 'middle';
+      cx.fillText(idx, x, lab ? CH * 0.38 : CH * 0.5);
+    }
+    if (lab) {
+      cx.font = '500 30px system-ui, sans-serif';
+      cx.textBaseline = 'middle';
+      cx.fillText(lab.slice(0, 10), x, idx ? CH * 0.72 : CH * 0.5);
+    }
+  }
+  if (!R3.tex) R3.tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, R3.tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return R3.tex;
+}
+
+/* ------------------------------------------------------------------ drawing */
+
+function camMatrix(aspect) {
+  const B = GEO.board;
+  const at = [B.x + B.w / 2, fy(B.y + B.h / 2), GEO.z.board / 2];
+  const c = R3.cam;
+  const cp = Math.cos(c.pitch), sp = Math.sin(c.pitch);
+  /* Frame the board rather than sit at a fixed distance, so it looks the same at every viewport
+   * width (this page is two columns above 1100 px and one below, so the canvas width really does
+   * change by a factor of nearly two).
+   *
+   * The board's on-screen extent is its width across, and its depth foreshortened by the pitch plus
+   * the standing height of the caps. Each axis is fitted to its own half-angle and the tighter of
+   * the two wins; the fudge factor covers what this linear estimate leaves out, which is that
+   * perspective makes the near edge bigger than an orthographic guess, and keeps the underglow rim
+   * — which is data, not decoration — inside the frame rather than cropped at the corners. */
+  const tv = Math.tan(FOV_Y / 2);
+  const halfW = GEO.board.w / 2 + 16;
+  const halfH = (GEO.board.h * sp + (GEO.z.board + GEO.z.cap) * cp) / 2 + 16;
+  const dist = Math.max(halfH / tv, halfW / (aspect * tv)) * 1.45 * c.zoom;
+  // Aim a little past the board's centre, away from the viewer: the projected shape is a trapezoid
+  // whose near edge is the big one, so aiming at the true centre leaves the picture bottom-heavy.
+  at[1] += 34 * cp;
+  // yaw 0 puts the camera in FRONT of the pad. World y is minus SVG y, so "in front" — the bottom
+  // row, larger SVG y — is NEGATIVE world y; get this sign wrong and you view the pad from behind,
+  // which looks exactly like a correct render with every legend rotated 180 degrees.
+  const eye = V3.add(at, V3.mul([Math.sin(c.yaw) * cp, -Math.cos(c.yaw) * cp, sp], dist));
+  return M4.mul(M4.perspective(FOV_Y, aspect, 40, 3200), M4.lookAt(eye, at, [0, 0, 1]));
+}
+
+/* How tall the canvas is relative to its width. Chosen so the fitted board leaves a little air and
+ * not a field of empty desk, at both the two-column and the one-column layout. */
+const CANVAS_RATIO = 0.66;
+
+function sizeCanvas() {
+  const cv = R3.canvas;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cssH = Math.max(120, Math.round(cv.clientWidth * CANVAS_RATIO));
+  const w = Math.max(1, Math.round(cv.clientWidth * dpr));
+  const h = Math.max(1, Math.round(cssH * dpr));
+  if (cv.width !== w || cv.height !== h) {
+    cv.width = w; cv.height = h;
+    cv.style.height = cssH + 'px';
+  }
+  return cv.width / cv.height;
+}
+
+/** What decoration an LED should carry: an event hit, the selection, or focus — the same order of
+ *  precedence, and the same colours, the flat view's strokes use. */
+function ringFor(zone, index, th) {
+  if (zone === 'keys') {
+    const age = hitAge('key', index);
+    if (age && state.evFlash) return age.source === 'device' ? th.ok : th.accent;
+  }
+  const sel = state.sel;
+  if (sel && sel.zone === zone && sel.index === index) return th.accent;
+  const f = state.view.focusLed;
+  if (f && f.zone === zone && f.index === index) return th.ink;
+  if (zone === 'keys' && state.bind.control === 'key' && state.bind.index === index) return V3.mul(th.accent, 0.55);
+  return null;
+}
+
+function draw3d(frame, pickPass) {
+  const gl = R3.gl;
+  if (!gl) return;
+  const aspect = sizeCanvas();
+  build3dScene();
+  const th = R3.theme || (R3.theme = themeColors());
+  const mvp = camMatrix(aspect);
+
+  // LED colours into the light arrays: exactly the frame's colours, so the spill under a cap is
+  // that cap's own colour rather than a tint of it.
+  for (let i = 0; i < KEY_COUNT; i++) {
+    const c = frame.keys[i] || [0, 0, 0];
+    R3.lightCol[i * 3] = c[0]; R3.lightCol[i * 3 + 1] = c[1]; R3.lightCol[i * 3 + 2] = c[2];
+  }
+  for (let i = 0; i < UG_COUNT; i++) {
+    const c = frame.ug[i] || [0, 0, 0];
+    const j = (KEY_COUNT + i) * 3;
+    R3.lightCol[j] = c[0]; R3.lightCol[j + 1] = c[1]; R3.lightCol[j + 2] = c[2];
+  }
+
+  gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  if (pickPass) gl.clearColor(0, 0, 0, 1);
+  else gl.clearColor(th.ground[0] * 0.55, th.ground[1] * 0.55, th.ground[2] * 0.55, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(R3.prog);
+  gl.uniformMatrix4fv(R3.loc.uMvp, false, new Float32Array(mvp));
+  gl.uniform4fv(R3.loc.uLpos, R3.lightPos);
+  gl.uniform3fv(R3.loc.uLcol, R3.lightCol);
+  gl.disable(gl.BLEND);
+  gl.depthMask(true);
+
+  const showIdx = $('chk-indices').checked;
+  const showLab = $('chk-labels').checked;
+  const sweeping = state.identify.active ? state.identify.target : null;
+  const atlas = pickPass ? null : ensureAtlas(Array.from({ length: KEY_COUNT }, (_, i) => {
+    const shown = sweeping === 'keys' ? state.geom?.keys?.[i]?.strip : i;
+    const idx = (showIdx || sweeping === 'keys') ? (shown === null || shown === undefined ? '—' : String(shown)) : '';
+    const lab = showLab ? (keyLabelOf(i) || '') : '';
+    return idx + '' + lab;
+  }));
+  if (atlas) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, atlas);
+    gl.uniform1i(R3.loc.uTex, 0);
+  }
+
+  const bindBuf = (o) => {
+    gl.bindBuffer(gl.ARRAY_BUFFER, o.buf);
+    const stride = 8 * 4;
+    gl.enableVertexAttribArray(R3.loc.aPos);
+    gl.vertexAttribPointer(R3.loc.aPos, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(R3.loc.aNrm);
+    gl.vertexAttribPointer(R3.loc.aNrm, 3, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(R3.loc.aUv);
+    gl.vertexAttribPointer(R3.loc.aUv, 2, gl.FLOAT, false, stride, 24);
+  };
+
+  const ledColor = (o) => {
+    if (o.zone === 'keys') return frame.keys[o.index] || [0, 0, 0];
+    if (o.zone === 'underglow') return frame.ug[o.index] || [0, 0, 0];
+    if (o.zone === 'status') {
+      const d = frame.status[o.index] || 0;
+      return [1, 0.94, 0.86].map((c) => (c * d) / 255);
+    }
+    return th[o.colorKey || 'faint'];
+  };
+
+  // Two passes: opaque first, then the decals with blending. Rings ride with the opaque pass.
+  const deferred = [];
+  for (let oi = 0; oi < R3.objects.length; oi++) {
+    const o = R3.objects[oi];
+    if (o.kind === 'decal') { if (!pickPass && atlas) deferred.push(o); continue; }
+    let ringColor = null;
+    if (o.kind === 'ring') {
+      if (pickPass) continue;
+      ringColor = ringFor(o.zone, o.index, th);
+      if (!ringColor) continue;
+    }
+    bindBuf(o);
+    if (pickPass) {
+      if (!o.pick) { gl.uniform1i(R3.loc.uMode, 0); gl.uniform3f(R3.loc.uColor, 0, 0, 0); }
+      else {
+        const id = oi + 1;
+        gl.uniform1i(R3.loc.uMode, 0);
+        gl.uniform3f(R3.loc.uColor, ((id >> 16) & 255) / 255, ((id >> 8) & 255) / 255, (id & 255) / 255);
+      }
+      gl.drawArrays(gl.TRIANGLES, 0, o.count);
+      continue;
+    }
+    gl.uniform1i(R3.loc.uMode, o.kind === 'ring' ? 0 : o.mode);
+    if (o.mode === 2) {
+      gl.uniform3fv(R3.loc.uBase, new Float32Array(th[o.baseKey]));
+      gl.uniform1f(R3.loc.uSpill, o.spill);
+    }
+    const col = o.kind === 'ring' ? ringColor : ledColor(o);
+    gl.uniform3f(R3.loc.uColor, col[0], col[1], col[2]);
+    gl.drawArrays(gl.TRIANGLES, 0, o.count);
+  }
+
+  if (deferred.length) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    gl.uniform1i(R3.loc.uMode, 3);
+    for (const o of deferred) {
+      bindBuf(o);
+      const ink = hexToRgb(inkFor(ledColor(o)).replace('#', ''));
+      gl.uniform3f(R3.loc.uColor, ink[0], ink[1], ink[2]);
+      gl.drawArrays(gl.TRIANGLES, 0, o.count);
+    }
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+  }
+}
+
+/* ------------------------------------------------------------------ picking */
+
+/** Exactly which surface is under a client point: render ids to the colour buffer and read the
+ *  pixel. Exact by construction — no ray/box arithmetic to get subtly wrong. */
+function pick3d(clientX, clientY) {
+  const gl = R3.gl;
+  if (!gl || !state.lastFrame) return null;
+  const r = R3.canvas.getBoundingClientRect();
+  if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return null;
+  draw3d(state.lastFrame, true);
+  const px = Math.round(((clientX - r.left) / r.width) * gl.drawingBufferWidth);
+  const py = Math.round(((r.bottom - clientY) / r.height) * gl.drawingBufferHeight);
+  const buf = new Uint8Array(4);
+  gl.readPixels(px, py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  draw3d(state.lastFrame, false);           // put the real picture back before anything composites
+  const id = (buf[0] << 16) | (buf[1] << 8) | buf[2];
+  if (!id) return null;
+  const o = R3.objects[id - 1];
+  if (!o || !o.pick) return null;
+  return o.feat ? { feat: o.feat } : { zone: o.zone, index: o.index };
+}
+
+/* ----------------------------------------------------------- orbit + pointer */
+
+function wire3dPointer(canvas) {
+  const DRAG_PX = 4;
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    canvas.setPointerCapture(ev.pointerId);
+    R3.drag = { x: ev.clientX, y: ev.clientY, yaw: R3.cam.yaw, pitch: R3.cam.pitch, moved: 0 };
+  });
+  canvas.addEventListener('pointermove', (ev) => {
+    if (R3.drag) {
+      const dx = ev.clientX - R3.drag.x, dy = ev.clientY - R3.drag.y;
+      R3.drag.moved = Math.max(R3.drag.moved, Math.hypot(dx, dy));
+      if (R3.drag.moved > DRAG_PX) {
+        canvas.classList.add('orbiting');
+        R3.cam.yaw = R3.drag.yaw - dx * 0.006;
+        // Never below the desk and never quite overhead: past vertical the pad reads as mirrored.
+        R3.cam.pitch = clamp(R3.drag.pitch + dy * 0.006, 0.12, 1.5533);
+      }
+      return;
+    }
+    // Hover: the cursor has to say what is clickable, and only picking knows.
+    hover3d(ev.clientX, ev.clientY);
+  });
+  const end = (ev) => {
+    if (!R3.drag) return;
+    const wasDrag = R3.drag.moved > DRAG_PX;
+    R3.drag = null;
+    canvas.classList.remove('orbiting');
+    if (wasDrag) { prefs.write('cam', { ...R3.cam }); return; }
+    const hit = pick3d(ev.clientX, ev.clientY);
+    if (hit) activate3d(hit);
+  };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', () => { R3.drag = null; canvas.classList.remove('orbiting'); });
+  canvas.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    R3.cam.zoom = clamp(R3.cam.zoom * (1 + Math.sign(ev.deltaY) * 0.08), 0.55, 2.4);
+    prefs.write('cam', { ...R3.cam });
+  }, { passive: false });
+}
+
+const hover3d = throttleTrailing((x, y) => {
+  if (!R3.gl || R3.drag) return;
+  const hit = pick3d(x, y);
+  const key = hit ? (hit.feat || `${hit.zone}:${hit.index}`) : '';
+  R3.canvas.style.cursor = hit ? 'pointer' : 'grab';
+  if (key !== R3.hover) R3.hover = key;
+}, 70);
+
+/** A click in the 3D scene, routed to exactly what a click on the SVG would do. */
+function activate3d(hit) {
+  if (hit.feat) {
+    selectControl(hit.feat, hit.feat === 'joystick' ? joyDefaultDir() : 0);
+    showTab('bindings');
+    return;
+  }
+  const ref = hit.zone === 'keys'
+    ? [...svgRefs.keys.values()].find((r) => indexAtPos('keys', `${r.cell.row},${r.cell.col}`) === hit.index)
+    : hit.zone === 'underglow'
+      ? svgRefs.ug.get(state.geom.ug[hit.index]?.pos?.join(',') || '')
+      : svgRefs.status[hit.index];
+  // Go through the SVG's own group so there is ONE activation path for both views: identify
+  // recording, selection, tab switching and the shared-cap notes all behave identically.
+  if (ref && ref.g) { ref.g.dispatchEvent(new MouseEvent('click', { bubbles: true })); ref.g.focus({ preventScroll: true }); }
+}
+
+/* ------------------------------------------------------- switching the views */
+
+function applyViewMode() {
+  const host = document.querySelector('.deviceview');
+  const want3d = state.view.threeD && !R3.failed && !state.identify.active;
+  // Asked for 3D and it cannot be had: say so rather than quietly staying flat.
+  if (want3d && !R3.gl && !gl3dInit()) { fall2d(); return; }
+  const want = want3d ? '3d' : '2d';
+  if (host.dataset.view === want) return;
+  host.dataset.view = want;
+  if (want === '3d') {
+    build3dScene();
+    if (state.lastFrame) draw3d(state.lastFrame, false);
+  } else {
+    R3.canvas && (R3.canvas.style.cursor = '');
+  }
+}
+
+const view3dActive = () => document.querySelector('.deviceview')?.dataset.view === '3d';
 
 /** Logical indices of the OTHER LEDs under the same physical keycap as this position. */
 function capMateIndices(posKey) {
@@ -1337,6 +2363,14 @@ function paint(frame) {
   const sel = state.sel;
   // A sweep is about strip numbering, so the board switches to it for the duration.
   const sweeping = state.identify.active ? state.identify.target : null;
+  /* `frame.keys` / `frame.ug` are what to PAINT — brightness already folded in for a mirrored
+   * frame. `rawKeys` / `rawUg` are the LED's own colour before dimming, which is what `data-hex`
+   * and the accessible name report, because "this LED is #00ff9e and the pad is at 16% brightness"
+   * is two facts and collapsing them would lose one. */
+  const rawK = frame.rawKeys || frame.keys;
+  const rawU = frame.rawUg || frame.ug;
+  const dim = frame.dim === undefined ? 1 : frame.dim;
+  const dimSay = dim < 0.995 ? `, dimmed to ${Math.round(dim * 100)} percent on the pad` : '';
 
   for (const [id, ref] of svgRefs.keys) {
     const i = indexAtPos('keys', id);
@@ -1346,6 +2380,8 @@ function paint(frame) {
     const hex = '#' + rgbToHex(rgb);
     ref.rect.setAttribute('fill', hex);
     svgRefs.glow.get('key:' + id).setAttribute('fill', hex);
+    // The frame colour exactly as the source gave it, undimmed — what the mirroring check reads.
+    ref.g.dataset.hex = i === null ? '' : rgbToHex(rawK[i] || [0, 0, 0]);
     ref.idx.textContent = showIdx || sweeping === 'keys' ? (shown === null ? '—' : String(shown)) : '';
     ref.idx.setAttribute('fill', inkFor(rgb));
     const label = i === null ? '' : keyLabelOf(i);
@@ -1365,7 +2401,7 @@ function paint(frame) {
       (strip === null ? ', no strip index mapped' : `, strip index ${strip}`) +
       (label ? `, ${label}` : '') +
       (mates.length ? `, one wide keycap shared with index ${mates.join(' and ')}` : '') +
-      `, colour ${rgbToHex(rgb)}`);
+      (i === null ? '' : `, colour ${rgbToHex(rawK[i] || [0, 0, 0])}${dimSay}`));
   }
 
   // Encoder / touch-pad ghosts light up for their events too, so a rotate or a tap is as
@@ -1389,14 +2425,17 @@ function paint(frame) {
     ref.idx.setAttribute('fill', inkFor(rgb));
     ref.g.dataset.unmapped = strip === null ? '1' : '0';
     ref.g.dataset.sel = sel && sel.zone === 'underglow' && sel.index === i ? '1' : '0';
+    ref.g.dataset.hex = i === null ? '' : rgbToHex(rawU[i] || [0, 0, 0]);
     ref.g.setAttribute('aria-label',
       `underglow at grid x ${ref.cell.gx} y ${ref.cell.gy}` +
       (i === null ? '' : `, ring position ${i}, an eighth of the board perimeter centred on that point`) +
       (strip === null ? ', no strip index mapped' : `, strip index ${strip}`) +
-      `, colour ${rgbToHex(rgb)}`);
+      (i === null ? '' : `, colour ${rgbToHex(rawU[i] || [0, 0, 0])}${dimSay}`));
   }
 
   svgRefs.status.forEach((ref, i) => {
+    // Not brightness-scaled, and that is not an oversight: `bright` in the firmware scales the two
+    // WS2812 chains only (main.c's `scale()`), while these three are their own LEDC PWM channels.
     const d = frame.status[i] || 0;
     const rgb = [1, 0.94, 0.86].map((c) => (c * d) / 255);
     const hex = '#' + rgbToHex(rgb);
@@ -1409,22 +2448,195 @@ function paint(frame) {
   });
 
   $('device').classList.toggle('identifying', state.identify.active);
+  applyViewMode();
 }
 
-/* ==================================================== 10. animation loop */
+/* ============================================ 10. mirroring the device
+ *
+ * The device view has two possible sources, and which one it is showing is stated on screen,
+ * because a simulation that claims to be the device is worse than no picture at all.
+ *
+ *   DEVICE   GET /api/frame, polled. The daemon composes the frame it is putting on the pad —
+ *            effects.py, the real clock, idle dimming, flashes, pulses, the volume bar, whatever
+ *            a preview has taken over — and answers with it. Nothing is recomputed here; the
+ *            colours painted are the colours returned, scaled by the brightness the daemon says
+ *            is actually applied. There is no second implementation to drift. Falls back to the
+ *            preview, saying so, when nothing answers.
+ *
+ *   PREVIEW  computeFrame(), this file's own reading of the config being edited. It is a design
+ *            tool: it works with no daemon and no pad, and it shows UNSAVED edits, which the pad
+ *            by definition cannot. It is never labelled as the device.
+ *
+ *   OFF      Preview off: the configured BASE layer only — per-key colours, the underglow base,
+ *            the status duties — with no effect and no animation. The quiet state, and the one to
+ *            pick when the board is a map you are aiming at rather than a picture.
+ *
+ * One three-way radio group picks between them, and the badge over the board always says which one
+ * you are looking at. There is deliberately no second "animate" control: two overlapping switches
+ * whose difference nobody can state is how the original bug got to hide.
+ *
+ * Polling rather than a stream: the daemon has no push channel, and /api/frame composes a frame
+ * per request, so the rate is capped by device.fps and backed off hard whenever nobody is looking
+ * — a hidden tab, a board scrolled out of view, a non-device source, or no daemon at all.
+ */
+
+const MIRROR_MIN_MS = 55;          // ~18 Hz ceiling however high device.fps is set
+const MIRROR_STALE_MS = 1200;      // a frame older than this plus one interval is not "now"
+const MIRROR_IDLE_MS = 1400;       // preview pinned, or board scrolled off: just enough to know
+const MIRROR_HIDDEN_MS = 3000;     // document.hidden — nobody is looking at all
+const MIRROR_RETRY_MS = 2500;      // no daemon answering
+
+function mirrorInterval() {
+  if (document.hidden) return MIRROR_HIDDEN_MS;
+  if (state.daemonReachable === false) return MIRROR_RETRY_MS;
+  if (!state.view.onscreen || state.view.source !== 'device') return MIRROR_IDLE_MS;
+  return Math.max(MIRROR_MIN_MS, Math.round(1000 / deviceFps()));
+}
+
+/** Is the last mirrored frame recent enough to be called "what the pad is showing"? */
+function mirrorFresh() {
+  const m = state.mirror;
+  return !!(m.ok && m.keys) && (performance.now() - m.at) < MIRROR_STALE_MS + mirrorInterval();
+}
+
+/** What the device view is showing right now: 'device', 'preview' or 'off'.
+ *
+ *  Only 'device' can be refused — asking for the pad when nothing answers falls back to the
+ *  preview, which the badge then labels as a preview and explains. */
+function viewMode() {
+  if (state.view.source !== 'device') return state.view.source;
+  return mirrorFresh() ? 'device' : 'preview';
+}
+
+/** The last mirrored frame, as a paintable frame. Brightness is applied here and only here. */
+function mirrorFrame() {
+  const m = state.mirror;
+  if (!m.keys) return null;
+  const dim = clamp(m.brightness / 255, 0, 1);
+  return {
+    keys: m.keys.map((c) => scale(c, dim)),
+    ug: m.ug.map((c) => scale(c, dim)),
+    status: m.status.slice(),
+    rawKeys: m.keys, rawUg: m.ug,
+    dim, source: 'device', connected: m.connected, seq: m.seq,
+  };
+}
+
+const padTo = (arr, n, fill) => {
+  const out = arr.slice(0, n);
+  while (out.length < n) out.push(Array.isArray(fill) ? fill.slice() : fill);
+  return out;
+};
+
+let frameTimer = null;
+let framePolling = false;
+
+async function pollFrame() {
+  if (framePolling) return;                 // one request in flight; it reschedules itself
+  clearTimeout(frameTimer); frameTimer = null;
+  framePolling = true;
+  let res;
+  try { res = await api.getFrame(); } finally { framePolling = false; }
+  const m = state.mirror;
+  const d = res.data;
+  if (res.ok && d && Array.isArray(d.keys) && Array.isArray(d.underglow)) {
+    // Indexed exactly as this page indexes LEDs already: keys by LOGICAL index, underglow by RING
+    // position. No translation, which is the point — the daemon's transport owns strip order.
+    m.keys = padTo(d.keys.map(hexToRgb), KEY_COUNT, [0, 0, 0]);
+    m.ug = padTo(d.underglow.map(hexToRgb), UG_COUNT, [0, 0, 0]);
+    m.status = padTo((Array.isArray(d.status) ? d.status : []).map((v) => clamp(Math.round(Number(v) || 0), 0, 255)), STATUS_COUNT, 0);
+    m.brightness = Number.isFinite(Number(d.brightness)) ? clamp(Math.round(Number(d.brightness)), 0, 255) : 255;
+    m.connected = !!d.connected;
+    m.at = performance.now();
+    m.seq++;
+    m.ok = true;
+    m.error = null;
+  } else {
+    m.ok = false;
+    m.error = res.reachable
+      ? (res.status === 404 ? 'this daemon has no /api/frame' : res.error || 'the daemon would not give a frame')
+      : 'no daemon is answering';
+  }
+  renderViewSource();
+  frameTimer = setTimeout(pollFrame, mirrorInterval());
+}
+
+/* ---------------------------------------------------------- saying which one */
+
+/** Which of the three the board is showing, said in the badge over it and in a line beneath. */
+function renderViewSource() {
+  const mode = viewMode();
+  const m = state.mirror;
+  const badge = $('view-src');
+  if (!badge) return;
+
+  let dot = 'off', label = '', why = [];
+  if (mode === 'device') {
+    dot = m.connected ? 'on' : 'warn';
+    label = m.connected ? 'mirroring the device' : 'mirroring the daemon · no device attached';
+    why.push(m.connected
+      ? 'Every colour on this board is the frame the daemon is putting on the pad right now — read from GET /api/frame, not recomputed here.'
+      : 'The daemon is composing frames but reports no pad connected, so this is what it WOULD send.');
+    if (m.brightness <= 0) {
+      // Faithful and unhelpful at the same time, so it says which knob gets the picture back.
+      why.push('The pad\'s LEDs are off right now — brightness 0, which is what an idle timeout does — so this board is dark too. Touch the pad, or switch to Preview to see the lighting the config describes.');
+    } else if (m.brightness < 250) {
+      why.push(`The pad is at brightness ${m.brightness}/255 (idle dimming included), so the board is drawn that dim too.`);
+    }
+    if (state.dirty && !state.live) {
+      why.push('You have unsaved edits: the pad is still running the saved config, so they are not on this board. Save, tick “Live preview on device”, or switch to Preview to see them.');
+    } else if (state.live) {
+      why.push('Live preview is on, so what the pad is showing — and therefore this board — is this page\'s design.');
+    }
+  } else if (mode === 'off') {
+    label = 'preview off · base colours only';
+    why.push('Preview is off, so this is the configured base layer and nothing else: per-key colours, the underglow base colour and the status duties, with no effect and no animation. Not a reading of any hardware.');
+  } else {
+    label = 'preview · not the device';
+    const asked = state.view.source === 'device';
+    const reason = asked
+      ? (m.error ? `${m.error.charAt(0).toUpperCase()}${m.error.slice(1)}, so Device is not available. ` : 'No frame from the daemon yet. ')
+      : '';
+    why.push(`${reason}This is this page's own animated simulation of the config being edited — including unsaved changes — and not a reading of any hardware.`);
+  }
+  const note = why.join(' ');
+
+  // Rebuilding text at frame rate would churn the DOM and fight a screen reader, so nothing is
+  // written unless what it says has changed.
+  const sig = `${mode}|${dot}|${label}|${note}`;
+  if (badge.dataset.sig === sig) return;
+  badge.dataset.sig = sig;
+  badge.dataset.mode = mode;
+  badge.querySelector('.dot').dataset.state = dot;
+  badge.querySelector('.v').textContent = label;
+  $('view-note').textContent = note;
+}
+
+/* ==================================================== 10b. the paint loop */
 
 function tick(ts) {
   const a = state.anim;
   if (!a.lastTs) a.lastTs = ts;
   const dt = (ts - a.lastTs) / 1000;
   a.lastTs = ts;
-  if (a.playing) a.t += dt;
+  const mode = viewMode();
+  // The preview clock only advances when a preview is what is on screen — or when live preview is
+  // streaming this page's frames to the pad, which needs the clock whatever the board shows.
+  if (mode === 'preview' || (state.live && state.previewChannel === 'frame')) a.t += dt;
   const interval = 1000 / deviceFps();
   if (ts - a.lastPaint >= interval - 1) {
     a.lastPaint = ts;
     try {
-      state.lastFrame = computeFrame(a.t);
-      paint(state.lastFrame);
+      /* The local simulation runs only when it is what is on screen. While mirroring, computing it
+       * would be work whose only possible use is to disagree with the pad. */
+      if (mode !== 'device') state.localFrame = computeFrame(a.t, mode !== 'off');
+      const frame = mode === 'device' ? mirrorFrame() : state.localFrame;
+      if (frame) {
+        state.lastFrame = frame;
+        paint(frame);
+        if (view3dActive()) draw3d(frame, false);
+      }
+      renderViewSource();
     } catch (e) { console.error(e); }
   }
   requestAnimationFrame(tick);
@@ -1440,7 +2652,11 @@ const EFFECT_REPUSH_MS = 240000;
 
 const pushFrame = throttleTrailing(() => {
   if (!state.live) return;
-  const f = state.lastFrame || computeFrame(state.anim.t);
+  /* Computed here rather than reused from whatever is on screen, and that is the point: the board
+   * may be mirroring the pad (pushing that back would be a feedback loop that ate the config's
+   * lighting one frame at a time) or showing base colours only with "Off". What live preview
+   * streams is always this page's full design, whatever the board happens to be displaying. */
+  const f = computeFrame(state.anim.t);
   state.previewChannel = 'frame';
   api.previewFrame({ ...frameToWire(f), ttl: PREVIEW_TTL_S }).then((r) => {
     if (!r.ok && !r.reachable) setLive(false, 'daemon unreachable — live preview off');
@@ -2008,6 +3224,9 @@ function renderIdentifyPanel() {
       : 'This table differs from the confirmed default wiring order — writing it overrides the default for this unit.');
   }
   if (!state.daemonReachable) bits.push('No daemon: the sweep cannot light the pad, but you can still edit the mapping by hand.');
+  if (id.active && state.view.threeD) {
+    bits.push('The board drops to the flat 2D view while a sweep runs, so the position you click is exactly where it looks.');
+  }
   $('id-note').textContent = bits.join(' · ');
 }
 
@@ -4636,7 +5855,67 @@ function wireChrome() {
 
   $('chk-indices').addEventListener('change', (ev) => { prefs.write('showIdx', ev.target.checked); if (state.lastFrame) paint(state.lastFrame); });
   $('chk-labels').addEventListener('change', (ev) => { prefs.write('showLab', ev.target.checked); if (state.lastFrame) paint(state.lastFrame); });
-  $('chk-anim').addEventListener('change', (ev) => { state.anim.playing = ev.target.checked; prefs.write('anim', ev.target.checked); });
+  /* Where the board's picture comes from: device / preview / off. Changing it kicks the frame poll
+   * rather than waiting out the current back-off, so picking "Device" is answered immediately. */
+  for (const r of document.querySelectorAll('input[name="view-source"]')) {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      state.view.source = r.value;
+      prefs.write('viewSource', state.view.source);
+      renderViewSource();
+      pollFrame();
+    });
+  }
+
+  $('chk-3d').addEventListener('change', (ev) => {
+    state.view.threeD = ev.target.checked;
+    prefs.write('view3d', state.view.threeD);
+    applyViewMode();
+    if (state.lastFrame) paint(state.lastFrame);
+  });
+
+  for (const b of document.querySelectorAll('#dv-cam [data-cam]')) {
+    b.addEventListener('click', () => {
+      Object.assign(R3.cam, CAM_PRESETS[b.dataset.cam] || CAM_PRESETS.three);
+      prefs.write('cam', { ...R3.cam });
+      if (view3dActive() && state.lastFrame) draw3d(state.lastFrame, false);
+    });
+  }
+
+  /* Focus inside the SVG is the ONLY focus there is in the 3D view — the canvas is aria-hidden and
+   * the focusable cells are the invisible SVG groups underneath. Tracking it here is what lets the
+   * 3D scene draw a ring for the focused cap, so tabbing stays visible. */
+  const dev = $('device');
+  dev.addEventListener('focusin', (ev) => {
+    const g = ev.target.closest && ev.target.closest('.cell-g');
+    if (!g) return;
+    const zone = g.dataset.zone;
+    const index = zone === 'status' ? Number(g.dataset.pos) : indexAtPos(zone, g.dataset.pos);
+    state.view.focusLed = index === null ? null : { zone, index };
+  });
+  dev.addEventListener('focusout', () => { state.view.focusLed = null; });
+
+  // The 3D scene reads its board / desk / accent colours out of the stylesheet, so a theme change
+  // has to drop the cached ones.
+  const mq = window.matchMedia('(prefers-color-scheme: light)');
+  const dropTheme = () => { R3.theme = null; };
+  if (mq.addEventListener) mq.addEventListener('change', dropTheme); else if (mq.addListener) mq.addListener(dropTheme);
+  window.addEventListener('resize', () => { if (view3dActive() && state.lastFrame) draw3d(state.lastFrame, false); });
+
+  /* Back off to almost nothing when nobody is looking. Two independent reasons: the whole tab is
+   * hidden, and the board has been scrolled out of view — at 900 px the layout is one column, so
+   * working in the editor puts the device view off screen for minutes at a time and there is no
+   * reason to make the daemon compose a frame 18 times a second for it. */
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollFrame(); });
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      const on = entries.some((e) => e.isIntersecting);
+      if (on === state.view.onscreen) return;
+      state.view.onscreen = on;
+      if (on) pollFrame();
+    }, { threshold: 0.02 });
+    io.observe($('device'));
+  }
   $('chk-live').addEventListener('change', (ev) => {
     setLive(ev.target.checked, ev.target.checked ? 'Live preview on — edits stream to the device' : null);
   });
@@ -4662,8 +5941,27 @@ function wireChrome() {
 function init() {
   $('chk-indices').checked = prefs.read('showIdx', true);
   $('chk-labels').checked = prefs.read('showLab', false);
-  $('chk-anim').checked = prefs.read('anim', true);
-  state.anim.playing = $('chk-anim').checked;
+
+  /* 3D is OFF by default, and it is a toggle. The 3D view is the better picture of what the pad
+   * will physically look like, but the flat view is the better instrument: it is what you aim at
+   * when binding keys and reading indices, it needs no GPU, and it is the one that cannot fail.
+   * A studio's default should be the dependable instrument with the nicer picture one click away,
+   * not the other way round — and the choice persists, so anyone who prefers 3D sets it once.
+   * The identify sweep forces the flat view for its duration whatever this says. */
+  state.view.threeD = prefs.read('view3d', false);
+  $('chk-3d').checked = state.view.threeD;
+  const src = prefs.read('viewSource', 'device');
+  // 'auto' is the name an earlier build used for what is now just 'device'.
+  state.view.source = ['device', 'preview', 'off'].includes(src) ? src : 'device';
+  const radio = document.querySelector(`input[name="view-source"][value="${state.view.source}"]`);
+  if (radio) radio.checked = true;
+  const cam = prefs.read('cam', null);
+  if (cam && Number.isFinite(cam.yaw) && Number.isFinite(cam.pitch)) {
+    R3.cam.yaw = cam.yaw;
+    R3.cam.pitch = clamp(cam.pitch, 0.12, 1.5533);
+    // An earlier build stored an absolute distance; anything without a zoom just gets the default.
+    if (Number.isFinite(cam.zoom)) R3.cam.zoom = clamp(cam.zoom, 0.55, 2.4);
+  }
   state.evPoll = prefs.read('evPoll', true);
   state.evFlash = prefs.read('evFlash', true);
   $('chk-ev-poll').checked = state.evPoll;
@@ -4685,6 +5983,8 @@ function init() {
   adoptConfig(clone(OFFLINE_CONFIG));
   state.dirty = false;
   renderTop();
+  applyViewMode();
+  renderViewSource();
 
   const tab = prefs.read('tab', 'color');
   showTab(TABS.includes(tab) ? tab : 'color');
@@ -4693,6 +5993,7 @@ function init() {
   loadAll();
   refreshStatus();
   pollEvents();
+  pollFrame();
 }
 
 init();
