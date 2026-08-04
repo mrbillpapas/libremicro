@@ -5,6 +5,10 @@ computer. The firmware knows nothing about apps, modes, or notifications — it 
 LEDs and reports raw input. All product logic lives on the host, where it's easy to change
 and AI-editable.
 
+The one exception is **untethered operation**: power on/off, deep sleep, battery gauge reads, and
+BLE HID have to work with no host attached, so they live on the device. The dividing line is
+*the device owns staying alive; the host owns being clever* — see `VISION.md`.
+
 ```
 Creator Micro 2 (thin firmware)          Host daemon (the brains)
   LED sink:                                reads host/config/*.json
@@ -39,9 +43,13 @@ Not built yet — `host/daemon/` holds the design placeholder. Responsibilities:
 
 - Open the serial port, stream input events in, stream LED commands out (via the same
   primitives `host/cli/lmctl.py` already implements).
-- Load `host/config/*.json`; map each key to a launch target / command / mode.
+- Load `host/config/*.json`; bind each trigger to a launch target, **keyboard shortcut**,
+  **script**, mode switch, or built-in action.
 - Run **modes**: on a mode key press, flash the key and switch the encoder's binding.
 - Run **watchers**: background pollers (e.g. Slack unread count) that pulse a key's LED.
+- Render **lighting**: composite a base layer, an animated palette/effect layer, and transient
+  flashes into one frame, then stream it over serial at a modest frame rate.
+- Serve the **local web UI** (layout view, palette designer, live preview, export/import).
 - Optional **agent mode**: subscribe to a Claude Code session's status and reflect it.
 
 The daemon is deliberately thin glue over (a) the serial protocol and (b) OS actions

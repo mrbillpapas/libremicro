@@ -18,6 +18,31 @@ capacitive touch pad, rear button.
 Driven with Espressif's `led_strip` component, SPI backend. Stock is byte-identical upstream
 `led_strip` v3.0.x; a v2.5.5 build emits the same WS2812 waveform.
 
+### Physical geometry
+
+Needed for spatial lighting effects (gradients, ripples, ring chases) and for the web UI's
+layout view.
+
+- **Key caps:** 4 rows of **2, 4, 4, 3** = 13. This matches the 4×4 scanned matrix with 3 of 16
+  slots unpopulated (2 missing in the 2-key row, 1 in the 3-key row).
+- **Underglow:** a **3×3 grid with no centre LED** = 8, i.e. a ring of positions
+  `(0,0) (1,0) (2,0) / (0,1) — (2,1) / (0,2) (1,2) (2,2)`.
+
+### Open question: strip index → physical position (UNVERIFIED)
+
+Three separate mappings are **not yet confirmed** and must not be guessed at in code:
+
+1. Which of the 4 matrix columns are populated in the 2-key row and the 3-key row.
+2. Which physical cap each of the 13 per-key strip indices (GPIO 7, order 0→12) lights — strip
+   wiring order need not match matrix index order.
+3. Which of the 8 ring positions each underglow strip index (GPIO 6, order 0→7) lights, and
+   which direction the ring runs.
+
+All three are cheap to settle empirically: light one LED at a time and look at the pad. The
+Phase 1 "identify sweep" in [`ROADMAP.md`](ROADMAP.md) exists for exactly this. Keep the
+resulting mapping in **config, not source**, so correcting it is a data change rather than a
+code change — and so a future hardware revision with different wiring is a config swap.
+
 ## The LED power rail (the thing that made custom firmware stay dark)
 
 The addressable LEDs are powered through a switched top-board rail on **GPIO 36 / 37 / 38**.
