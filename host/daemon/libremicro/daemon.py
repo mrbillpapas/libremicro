@@ -1,10 +1,10 @@
-"""The daemon: wires the serial link, the renderer, and the web UI together.
+"""The daemon: wires the serial link, the renderer, the input dispatcher, the notification
+watchers, and the web UI together.
 
-Input-event handling is stubbed deliberately. The firmware does not emit input events yet
-(that's Phase 2 in docs/ROADMAP.md — it needs three provisional pins re-verified first), so
-the plumbing is here and correct but the only thing an event currently does is register
-activity and flash the key. Binding dispatch — launch, keyboard shortcut, script, mode —
-lands in Phase 3, on top of this.
+Binding dispatch is fully implemented (see dispatch.py). The one gap is upstream: firmware v2
+emits input events but is not yet flashed, so in practice events currently arrive through
+`inject_event` from `POST /api/simulate` rather than from the pad. Both paths are identical
+from the dispatcher down, which is what makes the simulated one worth having.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from .dispatch import Dispatcher
 from .renderer import Renderer
 from .server import serve
 from .transport import Link
+from .watchers import Watchers
 
 
 class Daemon:
@@ -37,6 +38,10 @@ class Daemon:
                          layout=self.cfg.layout, on_event=self.handle_event)
         self.dispatcher = Dispatcher(self)
         self.renderer = Renderer(self.link, self.cfg, on_tick=self.dispatcher.tick)
+        # Notification watchers poll on their own threads and drive Renderer.pulse; nothing
+        # here touches the input or render path. `self.watchers.state()` is the read-only
+        # view of why a key is or isn't pulsing.
+        self.watchers = Watchers(self)
 
         webui = self.cfg.webui
         self._serve_ui = webui.get("enabled", True) if serve_ui is None else serve_ui
@@ -50,6 +55,7 @@ class Daemon:
         connected = self.link.ensure_connected()
         print(f"device: {'connected on ' + str(self.link.port) if connected else 'not found (will retry)'}", flush=True)
         self.renderer.start()
+        self.watchers.start()
 
         if self._serve_ui:
             try:
@@ -76,6 +82,7 @@ class Daemon:
 
     def stop(self) -> None:
         print("\nshutting down", flush=True)
+        self.watchers.stop()
         self.renderer.stop()
         if self._httpd is not None:
             self._httpd.shutdown()
@@ -97,6 +104,7 @@ class Daemon:
         self.link.layout = cfg.layout
         self.renderer.set_config(cfg)
         self.dispatcher.config_changed()
+        self.watchers.config_changed()
 
     def reload_config(self) -> bool:
         try:

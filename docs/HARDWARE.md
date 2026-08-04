@@ -125,16 +125,52 @@ Scanned **4×4 matrix**, 13 of 16 slots populated.
 Scan: drive all rows low, then strobe each row high (~10 µs settle) and read the 4 columns;
 time-based debounce. An any-column edge wakes the scan task.
 
-## Other inputs — **provisional, NOT yet re-verified**
+## Other inputs — resolved from the vendor firmware
 
-These came from a side decode and one analysis pass crashed before confirming them. Treat as
-TODO and re-verify against the disassembly before relying on them in firmware:
+Full evidence per signal in [`PIN-VERIFICATION.md`](PIN-VERIFICATION.md); each pin is attested
+3–5 independent ways within stock v0.6.1.
 
-| Signal | Provisional GPIO | Notes |
-|---|---|---|
-| Touch pad (`PIN_TOUCH_OUT_L`) | GPIO 2 | Digital active-low interrupt from an external touch IC (not the ESP32 touch peripheral) |
-| Encoder A / B / switch | GPIO 12 (+ B, switch TBD) | ANYEDGE; quadrature |
-| Rear button | GPIO 14 | glitch-filtered; **conflicts** with GPIO 2 also being cited as the ext0 wake pin — resolve this |
+| Signal | GPIO | Polarity | Confidence |
+|---|---|---|---|
+| Touch pad (`PIN_TOUCH_OUT_L`) | **14** | active **high** | pin: very high; polarity: medium-high |
+| Encoder A | **12** | quadrature | very high |
+| Encoder B | **11** | quadrature | very high |
+| Encoder switch | **4** | active low | very high |
+| Rear button | **2** | active low | very high |
+| USB detect | **42** | active low | high (newly found) |
+
+**The old provisional table had touch and rear swapped**, and that swap was the entire
+"GPIO 2 is cited as both the touch input and the ext0 wake pin" conflict. There was never a
+conflict: GPIO 2 is the rear button, and stock does use it as the ext0 wake pin.
+
+All six inputs are `INPUT` + `ANYEDGE` with **both internal pulls disabled** (the board has
+external pulls), and stock puts a fixed-width glitch filter on every one of them, not just the
+rear button.
+
+Two things still unproven, both needing one hardware read rather than more analysis:
+
+- **Touch polarity.** The vendor ISR passes the raw level with no inversion, unlike the rear
+  button and encoder switch in the same file which both compute `(level == 0)`. So active-high
+  is the reading, and the `_L` suffix is probably *Left* (the pad sits at grid `(3,0)`) rather
+  than *active Low*. If touch fires when nothing is touching, flip `LM_TOUCH_ACTIVE_HIGH`.
+- **Which rotation is clockwise.** Not determinable from firmware — it depends on PCB wiring.
+  If the dial feels backwards, swap `LM_PIN_ENC_A` and `LM_PIN_ENC_B`.
+
+### Two hazards on GPIO 2
+
+The `{"rescue":"rear_button_via_ulp"}` string stock reports is real and decoded: armed by the
+`sys.bootloader` RPC, it does `rtc_gpio_hold_en(2)` and starts a 446-byte ULP-RISCV watcher at
+250 ms period that forces `SW_SYS_RST` on a rear-button press. Consequences for custom firmware:
+
+1. **GPIO 2 can arrive under an RTC hold**, so reads are meaningless until
+   `rtc_gpio_hold_dis()` — the same failure class as the LED rail, on a different pin.
+2. **The ULP watcher may still be running**, in which case a rear-button press resets the
+   device. If you used `scripts/enter_bootloader.sh` (which calls that RPC) it is probably
+   armed right now. Custom firmware does not yet halt it.
+
+Stock also waits ~2 s for the rear button to be released before arming ext0, logging
+`rear stuck LOW, ext0 SKIPPED` otherwise. Power management must replicate that guard or the
+device will bounce straight back out of deep sleep.
 
 ## Other known pins
 
@@ -142,6 +178,7 @@ TODO and re-verify against the disassembly before relying on them in firmware:
 |---|---|
 | I²C SDA / SCL (MAX77972 charger/fuel-gauge) | 8 / 9 |
 | Charge-enable | 44 |
+| USB detect | 42 (active low) |
 | USB D- / D+ | 19 / 20 |
 | Boot strapping | 0 |
 

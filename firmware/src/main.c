@@ -169,15 +169,27 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 #define LM_ENABLE_UNVERIFIED_INPUTS 0
 #endif
 
-// Single place for the provisional pin numbers. -1 means "genuinely unknown" —
-// the code skips any input whose pins are not all filled in, rather than guessing
-// a pin number and poking it.
-#define LM_PIN_TOUCH    2    // provisional; active-low int from external touch IC
-                             // CONFLICT: also cited as the ext0 wake pin.
-#define LM_PIN_REAR     14   // provisional; glitch-filtered button
-#define LM_PIN_ENC_A    12   // provisional; quadrature A
-#define LM_PIN_ENC_B    (-1) // UNKNOWN — must be filled in
-#define LM_PIN_ENC_SW   (-1) // UNKNOWN — must be filled in
+// Pin numbers, now RESOLVED from the vendor firmware — see docs/PIN-VERIFICATION.md
+// for the evidence (3-5 independent attestations per pin).
+//
+// The old provisional table had TOUCH AND REAR SWAPPED. That swap was the entire
+// "GPIO 2 is cited as both touch and ext0 wake" conflict: GPIO 2 is the rear
+// button, and stock genuinely does use it as the ext0 wake pin. No conflict.
+#define LM_PIN_TOUCH    14   // external touch IC interrupt
+#define LM_PIN_REAR     2    // rear button, active LOW; ALSO stock's ext0 wake pin
+#define LM_PIN_ENC_A    12   // quadrature A (vendor gpio_config mask 0x1000)
+#define LM_PIN_ENC_B    11   // quadrature B (mask 0x800)
+#define LM_PIN_ENC_SW   4    // encoder push switch, active LOW (mask 0x10)
+// Which rotation direction is "cw" is NOT in the firmware — it depends on PCB
+// wiring. If the dial feels backwards, swap ENC_A and ENC_B.
+
+// Touch polarity is the ONE thing static analysis could not settle. The ISR passes
+// the raw level with no inversion, unlike the rear button and encoder switch in the
+// same vendor file which both compute (level == 0) — so active HIGH is the reading,
+// and "_L" in PIN_TOUCH_OUT_L is probably "Left" (the pad sits at grid (3,0)) rather
+// than "active Low". One hardware read settles it: if touch fires when you are NOT
+// touching, flip this to 0.
+#define LM_TOUCH_ACTIVE_HIGH 1
 
 // Quadrature transitions per detent. Typical detented encoders give 4; unverified.
 #define LM_ENC_STEPS_PER_DETENT 4
@@ -702,7 +714,8 @@ static void aux_task(void *arg)
         uint8_t tv = (uint8_t)gpio_get_level(LM_PIN_TOUCH);
         if (tv != touch_state) {
             touch_state = tv;
-            if (!tv && (TickType_t)(now - last_touch) >= pdMS_TO_TICKS(LM_AUX_TAP_MS)) {
+            const bool touched = LM_TOUCH_ACTIVE_HIGH ? (tv != 0) : (tv == 0);
+            if (touched && (TickType_t)(now - last_touch) >= pdMS_TO_TICKS(LM_AUX_TAP_MS)) {
                 last_touch = now;
                 out_line("touch\n");
             }
@@ -723,11 +736,22 @@ static void aux_task(void *arg)
 
 static void aux_inputs_start(void)
 {
-    aux_cfg_input(LM_PIN_TOUCH,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_ENABLE);
-    aux_cfg_input(LM_PIN_REAR,   GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_ENABLE);
-    aux_cfg_input(LM_PIN_ENC_A,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_ENABLE);
-    aux_cfg_input(LM_PIN_ENC_B,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_ENABLE);
-    aux_cfg_input(LM_PIN_ENC_SW, GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_ENABLE);
+    // GPIO 2 needs its RTC hold released before it can be read. Stock's rear-button
+    // rescue path (armed by the sys.bootloader RPC — so it may well be armed right now
+    // if the device was just flashed) does rtc_gpio_hold_en(2) plus a ULP-RISCV watcher
+    // that forces SW_SYS_RST on a rear press. Same bug class as the LED rail: without
+    // this, reads are meaningless. Halting the ULP is deliberately NOT attempted here;
+    // see the note in firmware/README.md before enabling this block.
+    rtc_gpio_hold_dis(LM_PIN_REAR);
+    rtc_gpio_deinit(LM_PIN_REAR);
+
+    // Stock disables BOTH internal pulls on all of these — the board has external
+    // pulls, and fighting them with an internal pull-up skews the thresholds.
+    aux_cfg_input(LM_PIN_TOUCH,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    aux_cfg_input(LM_PIN_REAR,   GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    aux_cfg_input(LM_PIN_ENC_A,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    aux_cfg_input(LM_PIN_ENC_B,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    aux_cfg_input(LM_PIN_ENC_SW, GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
     xTaskCreatePinnedToCore(aux_task, "lm_aux", 3072, NULL, 4, NULL, 1);
     ESP_LOGW(TAG, "UNVERIFIED inputs enabled: touch=%d rear=%d encA=%d encB=%d encSW=%d",
              LM_PIN_TOUCH, LM_PIN_REAR, LM_PIN_ENC_A, LM_PIN_ENC_B, LM_PIN_ENC_SW);
