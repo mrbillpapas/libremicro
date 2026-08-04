@@ -203,27 +203,37 @@ main {
 /* --------------------------------------------------------------- svg parts */
 
 .board { fill: var(--bg-3); stroke: var(--line); }
-.ug-cell, .key-cell, .st-cell {
+.key-cell, .st-cell {
   stroke: color-mix(in srgb, var(--fg) 16%, transparent);
   stroke-width: 1;
   cursor: pointer;
 }
 .glowlayer { filter: blur(9px); opacity: .55; pointer-events: none; }
 .cell-g:hover .key-cell,
-.cell-g:hover .ug-cell,
 .cell-g:hover .st-cell { stroke: var(--fg); stroke-width: 1.6; }
 .cell-g[data-sel="1"] .key-cell,
-.cell-g[data-sel="1"] .ug-cell,
 .cell-g[data-sel="1"] .st-cell { stroke: var(--accent); stroke-width: 2.4; }
 .cell-g:focus { outline: none; }
 .cell-g:focus-visible .key-cell,
-.cell-g:focus-visible .ug-cell,
 .cell-g:focus-visible .st-cell { stroke: var(--accent); stroke-width: 2.4; stroke-dasharray: 4 3; }
-.cell-g[data-unmapped="1"] .key-cell,
-.cell-g[data-unmapped="1"] .ug-cell { stroke-dasharray: 3 3; stroke: var(--warn); }
+.cell-g[data-unmapped="1"] .key-cell { stroke-dasharray: 3 3; stroke: var(--warn); }
 .cell-idx { font: 600 11px var(--mono); text-anchor: middle; pointer-events: none; }
+/* the three status marks are far smaller than a keycap, so their duty number needs its own size */
+.cell-idx.st-idx { font-size: 7.5px; }
 .cell-lab { font: 500 8.5px var(--sans); text-anchor: middle; pointer-events: none; opacity: .85; }
 .nocentre { fill: none; stroke: var(--fg-faint); stroke-dasharray: 3 4; pointer-events: none; opacity: .8; }
+
+/* Underglow: eight equal shares of ONE perimeter path. The dash carries the LED colour, so its
+   stroke can't also carry a highlight — `.ug-edge` is a wider copy underneath whose stroke shows
+   as a rim along both long sides of the share. `butt` caps are what make neighbours abut exactly:
+   any other cap would extend each share past its eighth and overlap the next. */
+.ug-band, .ug-edge, .ug-glow { fill: none; stroke-linecap: butt; stroke-linejoin: round; }
+.ug-band { cursor: pointer; }
+.ug-edge { stroke: color-mix(in srgb, var(--fg) 14%, transparent); pointer-events: none; }
+.cell-g:hover .ug-edge { stroke: color-mix(in srgb, var(--fg) 60%, transparent); }
+.cell-g[data-unmapped="1"] .ug-edge { stroke: var(--warn); }
+.cell-g[data-sel="1"] .ug-edge,
+.cell-g:focus-visible .ug-edge { stroke: var(--accent); }
 .zone-t { font: 500 9px var(--sans); fill: var(--fg-faint); text-anchor: middle; }
 .zone-t.start { text-anchor: start; }
 .zone-t.end { text-anchor: end; }
@@ -243,7 +253,9 @@ main {
 .feat-dash { stroke-dasharray: 4 3; }
 .feat-lab { font: 500 8px var(--sans); fill: var(--fg-faint); text-anchor: middle; letter-spacing: .02em; }
 svg.identifying .cell-g { cursor: crosshair; }
-svg.identifying .key-cell, svg.identifying .ug-cell { stroke-width: 1.4; }
+svg.identifying .key-cell { stroke-width: 1.4; }
+/* not the band's own stroke-width — that is the physical width of its share of the perimeter */
+svg.identifying .ug-edge { stroke: color-mix(in srgb, var(--fg) 35%, transparent); }
 
 /* -------------------------------------------------------------------- tabs */
 

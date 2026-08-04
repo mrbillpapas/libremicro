@@ -17,9 +17,10 @@ const DEFAULT_KEY_ROWS = [2, 4, 4, 3];
 
 /* The 3x3-minus-centre underglow ring, listed clockwise from the top-left corner — layout.py's
  * UNDERGLOW_RING. All eight are the same physical size, evenly spaced around the square (CONFIRMED
- * — docs/HARDWARE.md). The (gx, gy) pairs are the position identity the config stores, and this
- * order IS the ring numbering: it indexes the underglow array posted to /api/preview/frame and is
- * the traversal order for `direction: "ring"`, so nothing here may be reordered casually.
+ * — docs/HARDWARE.md), which is exactly why each one can own a full eighth of the board's
+ * perimeter: see ugBandGeom(). The (gx, gy) pairs are the position identity the config stores, and
+ * this order IS the ring numbering: it indexes the underglow array posted to /api/preview/frame and
+ * is the traversal order for `direction: "ring"`, so nothing here may be reordered casually.
  * Which STRIP index lights each of these is a separate mapping (DEFAULT_UNDERGLOW_POSITIONS). */
 const RING_ORDER = [[0, 0], [1, 0], [2, 0], [2, 1], [2, 2], [1, 2], [0, 2], [0, 1]];
 
@@ -178,19 +179,27 @@ const DEFAULT_UNDERGLOW_POSITIONS = [
   [2, 1],
 ];
 
-/* SVG geometry, in one place. The board is a square: the 8 underglow LEDs are equal-sized cells
- * whose centres are evenly spaced around it (3x3 minus centre), and the 4x4 key grid sits inside
- * the ring sharing its centre. Nothing here is derived from row widths — every slot has a fixed
- * grid position now. */
+/* SVG geometry, in one place. The board is a square: the 8 underglow LEDs tile its WHOLE
+ * perimeter, an eighth of the perimeter length each, and the 4x4 key grid sits inside that band
+ * sharing its centre. Nothing here is derived from row widths — every slot has a fixed grid
+ * position now. */
 const GEO = {
   board: { x: 8, y: 8, w: 384, h: 384, r: 22 },
-  // inset = distance from the board edge to an underglow cell CENTRE; size is the same for all 8.
-  ug: { inset: 26, size: 32, r: 10 },
-  keyBand: { x: 57, y: 81, w: 286, h: 238 },
+  /* Underglow is ONE continuous band around the whole perimeter, cut into eight equal shares.
+   * `inset` is the distance from the board edge to the band's CENTRELINE, `thick` is the band
+   * width (the stroke-width of the shared path), `r` the centreline's corner radius. See
+   * ugBandGeom(). Nothing about a single LED's size lives here any more: a share's length is
+   * always exactly perimeter/8, by construction. */
+  ug: { inset: 21, thick: 22, r: 14 },
+  /* The key block, sized to leave clear air between it and the perimeter band on all four
+   * sides: the band's inner edge is at board + inset - thick/2 = 40 / 360. */
+  keyBand: { x: 54, y: 80, w: 292, h: 240 },
   key: { gap: 10, r: 9 },
-  // The 3 PWM status LEDs are a vertical stack at the bottom-left, under the touch pad and
-  // immediately below the key cluster — where they physically are.
-  status: { x: 57, y: 324, w: 34, h: 18, gap: 5, r: 5 },
+  /* The 3 PWM status LEDs: a small vertical column immediately LEFT of the touch pad and inside
+   * the touch pad's own grid slot, at the bottom-left of the key block — three small marks
+   * beside the pad circle, as the faceplate has them. `pad` is the inset from the slot's left
+   * edge and `clear` the gap left before the touch glyph, which centres in what remains. */
+  status: { w: 16, h: 12, gap: 5, r: 4, pad: 4, clear: 5 },
   noteY: [404],
   vbW: 400, vbH: 412,
 };
@@ -668,6 +677,87 @@ function logicalPos(rows, logical) {
   return null;
 }
 
+/* ---------------------------------------------------------- underglow band
+
+ * The eight underglow LEDs tile the WHOLE perimeter, an eighth of it each.
+ *
+ * Why that works out to exact eighths without any trigonometry: the eight ring positions are the
+ * four corners and the four edge midpoints of the 3x3-minus-centre grid, so going clockwise you
+ * alternate corner, edge-midpoint, corner, edge-midpoint. On a rounded SQUARE the arc-length step
+ * from a straight edge's midpoint to the adjacent corner arc's midpoint is (side)/2 + (pi*r/2)/2 —
+ * half a straight plus half a corner arc — and that is the same number for all eight steps, eight
+ * of which sum to the full perimeter. So adjacent positions really are exactly L/8 apart, and each
+ * LED owns the L/8 band CENTRED on its own point.
+ *
+ * That means the four corner LEDs' bands straddle a corner (an L, L/16 down each adjoining side)
+ * while the four edge-midpoint bands lie flat on one side. That is correct and wanted: real
+ * underglow diffuses around a corner.
+ *
+ * Rendering: one shared rounded-rect path, and each LED is its own copy of it showing a single
+ * dash — dasharray `L/8, 7L/8`, offset placing that dash over its own share, stroke-width the band
+ * thickness, `stroke-linecap: butt` so neighbours abut exactly. Each share stays an individually
+ * clickable, focusable, colourable element, and the shares tile L with no seam and no overlap
+ * because they are literally slices of one length.
+ *
+ * The path starts at a band BOUNDARY, not at a ring point, so no share is split across the path's
+ * start/end: `d0` puts the start point on the top edge exactly L/16 short of the top-left corner
+ * arc's midpoint, which is ring position 0's centre. Ring position i's share therefore begins at
+ * ((i - 1) mod 8) * L/8 — `ringSlot` below. */
+
+/** The band centreline as one closed rounded-rect path, plus its analytic length. */
+function ugBandGeom() {
+  const b = GEO.board, ins = GEO.ug.inset;
+  const x = b.x + ins, y = b.y + ins, w = b.w - 2 * ins, h = b.h - 2 * ins;
+  const r = clamp(GEO.ug.r, 0, Math.min(w, h) / 2);
+  // The board is square, so both straights are the same length and the eighths are exact. A
+  // non-square board would still tile, just not into equal shares — hence the assertion.
+  const straight = w - 2 * r;
+  const L = 2 * (w - 2 * r) + 2 * (h - 2 * r) + 2 * Math.PI * r;
+  const d0 = clamp(straight / 4 - (Math.PI * r) / 8, 0, straight);
+  const arc = (px, py) => `A ${r},${r} 0 0 1 ${px},${py}`;
+  const d = `M ${x + r + d0},${y} H ${x + w - r} ${arc(x + w, y + r)}`
+    + ` V ${y + h - r} ${arc(x + w - r, y + h)}`
+    + ` H ${x + r} ${arc(x, y + h - r)}`
+    + ` V ${y + r} ${arc(x + r, y)}`
+    + ` H ${x + r + d0} Z`;
+  return { x, y, w, h, r, d, L };
+}
+
+/** Where a ring position sits on the band centreline: a corner arc's midpoint, or an edge's. */
+function ugRingPoint(gx, gy, bg) {
+  const k = bg.r * (1 - Math.SQRT1_2);           // corner arc midpoint, inset from the sharp corner
+  const on = (g, other, span) => (
+    g === 1 ? span / 2                            // an edge midpoint: halfway along that side
+      : other === 1 ? (g === 0 ? 0 : span)        // ...on the near or far side
+        : (g === 0 ? k : span - k));              // a corner: 45 degrees round its arc
+  return { cx: bg.x + on(gx, gy, bg.w), cy: bg.y + on(gy, gx, bg.h) };
+}
+
+/** A path's own measured length, which is what the dash engine will use. */
+function pathLength(el, fallback) {
+  try { const l = el.getTotalLength(); return l > 0 ? l : fallback; } catch { return fallback; }
+}
+
+/** Check the eight dashes really do tile the whole perimeter — every share a distinct eighth, the
+ *  eighths summing to the measured total, and each one CENTRED on its own ring point. Cheap, runs
+ *  once per rebuild, and reports rather than throws: a mistiled band is a drawing bug. */
+function assertBandTiling(pathEl, L, cells) {
+  const seg = L / UG_COUNT;
+  const slots = new Set();
+  const bad = [];
+  for (const c of cells) {
+    slots.add(c.ringSlot);
+    let p;
+    try { p = pathEl.getPointAtLength((c.ringSlot + 0.5) * seg); } catch { return true; }
+    const off = Math.hypot(p.x - c.cx, p.y - c.cy);
+    if (off > 0.75) bad.push(`share ${c.ring} is centred ${off.toFixed(2)}px off its ring point`);
+  }
+  if (slots.size !== UG_COUNT) bad.push(`${slots.size} distinct shares, expected ${UG_COUNT} — they overlap or leave a gap`);
+  if (Math.abs(UG_COUNT * seg - L) > 1e-6) bad.push(`shares span ${(UG_COUNT * seg).toFixed(4)} of ${L.toFixed(4)}`);
+  if (bad.length) console.warn('underglow perimeter band: ' + bad.join('; '));
+  return !bad.length;
+}
+
 function buildGeometry() {
   const rows = keyRows();
   const gcols = gridColsFor(rows);
@@ -723,17 +813,23 @@ function buildGeometry() {
     capOf.set(id, cap);
   }
 
-  // Underglow: 8 equal cells, centres evenly spaced around the square, no centre LED.
-  const ugCentre = (g, axis) => {
-    const b = GEO.board, ins = GEO.ug.inset;
-    return (axis === 'x' ? b.x : b.y) + ins + (g * ((axis === 'x' ? b.w : b.h) - 2 * ins)) / 2;
+  /* Underglow: eight equal shares of the whole perimeter, no centre LED. A share is a slice of
+   * the shared band path (see ugBandGeom), so a cell carries its ring point — which is where its
+   * band is centred and where its label goes — and `ringSlot`, which eighth of the path it owns. */
+  const ugBand = ugBandGeom();
+  const ugCells = RING_ORDER.map(([gx, gy], ring) => ({
+    gx, gy, ring,
+    ringSlot: (ring + UG_COUNT - 1) % UG_COUNT,
+    ...ugRingPoint(gx, gy, ugBand),
+  }));
+  // The absent 9th slot of the 3x3 grid, at the band's own thickness so it reads as one more
+  // share's worth of light that simply isn't there.
+  const ncS = GEO.ug.thick + 6;
+  const noCentre = {
+    x: GEO.board.x + GEO.board.w / 2 - ncS / 2,
+    y: GEO.board.y + GEO.board.h / 2 - ncS / 2,
+    w: ncS, h: ncS, r: 6,
   };
-  const ugCells = RING_ORDER.map(([gx, gy], ring) => {
-    const s = GEO.ug.size, cx = ugCentre(gx, 'x'), cy = ugCentre(gy, 'y');
-    return { gx, gy, ring, x: cx - s / 2, y: cy - s / 2, w: s, h: s, cx, cy };
-  });
-  const ugAt = (gx, gy) => ugCells.find((x) => x.gx === gx && x.gy === gy) || null;
-  const noCentre = { x: ugCentre(1, 'x') - GEO.ug.size / 2, y: ugCentre(1, 'y') - GEO.ug.size / 2, w: GEO.ug.size, h: GEO.ug.size };
 
   // The three non-key controls, at their confirmed grid slots. Drawn, never addressable.
   const featureCells = FEATURES
@@ -798,14 +894,28 @@ function buildGeometry() {
   const ugPosToIndex = new Map();
   ug.forEach((u) => { ugPosToIndex.set(u.pos.join(','), u.index); });
 
+  /* The three PWM status LEDs: a small vertical column in the LEFT of the touch pad's own grid
+   * slot, which puts them immediately left of the pad circle and inside the key block's footprint
+   * — not below it, and well clear of the perimeter band. The touch glyph is told how much of its
+   * slot they take so it centres in what's left instead of drawing over them. */
+  const st = GEO.status;
+  const stColW = st.pad + st.w + st.clear;
+  const touchCell = featureCells.find((f) => f.kind === 'touch');
+  if (touchCell) touchCell.padLeft = stColW;
+  // A key_rows layout with no touch slot at all still needs somewhere inside the key block: the
+  // bottom-left cell of the grid, never the board edge where the band now lives.
+  const stHost = touchCell || { x: band.x, y: rowY(Math.max(0, nRows - 1)), w: kw, h: kh };
+  const stH = STATUS_COUNT * st.h + (STATUS_COUNT - 1) * st.gap;
+  const stX = stHost.x + st.pad;
+  const stY = stHost.y + (stHost.h - stH) / 2;
   const statusCells = [];
   for (let i = 0; i < STATUS_COUNT; i++) {
-    const s = GEO.status, y = s.y + i * (s.h + s.gap);
-    statusCells.push({ i, x: s.x, y, w: s.w, h: s.h, cx: s.x + s.w / 2, cy: y + s.h / 2 });
+    const y = stY + i * (st.h + st.gap);
+    statusCells.push({ i, x: stX, y, w: st.w, h: st.h, cx: stX + st.w / 2, cy: y + st.h / 2 });
   }
 
   state.geom = {
-    rows, gcols, nRows, nCols, cells, caps, capOf, ugCells, noCentre, featureCells, statusCells,
+    rows, gcols, nRows, nCols, cells, caps, capOf, ugBand, ugCells, noCentre, featureCells, statusCells,
     keys, ug, keyPosToIndex, ugPosToIndex, keyPosToStrip, ugPosToStrip,
     defaultedKeys: kp.fromDefaults, defaultedUg: up.fromDefaults,
     defKeys, defUg,
@@ -960,29 +1070,34 @@ function featureGlyph(f) {
     class: `feat feat-${f.kind}`, 'aria-hidden': 'true',
     'data-bindable': f.kind === 'joystick' ? '0' : '1',
   });
-  const cy = f.cy - 6, r = Math.min(f.w, f.h) / 2 - 5;
+  // `padLeft` is slot width claimed by something else drawn in the same slot — the status LED
+  // column, which sits immediately left of the touch pad. The glyph centres in what is left of the
+  // slot rather than in the whole of it, so the two never overlap.
+  const pad = f.padLeft || 0;
+  const bx = f.x + pad, bw = Math.max(18, f.w - pad), bcx = bx + bw / 2;
+  const cy = f.cy - 6, r = Math.min(bw, f.h) / 2 - 5;
   if (f.kind === 'encoder') {
-    g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r }));
-    g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r: r * 0.42 }));
-    g.append(svgEl('line', { class: 'feat-shape', x1: f.cx, y1: cy - r, x2: f.cx, y2: cy - r * 0.55 }));
+    g.append(svgEl('circle', { class: 'feat-shape', cx: bcx, cy, r }));
+    g.append(svgEl('circle', { class: 'feat-shape', cx: bcx, cy, r: r * 0.42 }));
+    g.append(svgEl('line', { class: 'feat-shape', x1: bcx, y1: cy - r, x2: bcx, y2: cy - r * 0.55 }));
   } else if (f.kind === 'joystick') {
-    g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r }));
-    g.append(svgEl('circle', { class: 'feat-knob', cx: f.cx, cy, r: r * 0.34 }));
+    g.append(svgEl('circle', { class: 'feat-shape', cx: bcx, cy, r }));
+    g.append(svgEl('circle', { class: 'feat-knob', cx: bcx, cy, r: r * 0.34 }));
     for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
       g.append(svgEl('line', {
         class: 'feat-shape',
-        x1: f.cx + dx * r * 0.5, y1: cy + dy * r * 0.5,
-        x2: f.cx + dx * r * 0.82, y2: cy + dy * r * 0.82,
+        x1: bcx + dx * r * 0.5, y1: cy + dy * r * 0.5,
+        x2: bcx + dx * r * 0.82, y2: cy + dy * r * 0.82,
       }));
     }
   } else {
-    const w = f.w - 12, h = Math.min(f.h - 16, 30);
-    g.append(svgEl('rect', { class: 'feat-shape feat-dash', x: f.cx - w / 2, y: cy - h / 2, width: w, height: h, rx: 7 }));
+    const w = Math.max(16, bw - 8), h = Math.min(f.h - 16, 26);
+    g.append(svgEl('rect', { class: 'feat-shape feat-dash', x: bcx - w / 2, y: cy - h / 2, width: w, height: h, rx: 7 }));
     for (const k of [0.32, 0.6]) {
-      g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r: (h / 2) * k }));
+      g.append(svgEl('circle', { class: 'feat-shape', cx: bcx, cy, r: (h / 2) * k }));
     }
   }
-  const lab = svgEl('text', { class: 'feat-lab', x: f.cx, y: f.y + f.h - 2 });
+  const lab = svgEl('text', { class: 'feat-lab', x: bcx, y: f.y + f.h - 2 });
   lab.textContent = f.label;
   g.append(lab);
   return g;
@@ -1005,32 +1120,54 @@ function buildDevice() {
   const glow = svgEl('g', { class: 'glowlayer' });
   svg.append(glow);
 
-  const addGlow = (kind, id, attrs) => {
-    const r = svgEl('rect', attrs);
+  const addGlow = (kind, id, attrs, tag = 'rect') => {
+    const r = svgEl(tag, attrs);
     glow.append(r);
     svgRefs.glow.set(kind + ':' + id, r);
+    return r;
   };
 
-  // Underglow first so it reads as sitting behind/around the keys. All 8 cells are identical in
-  // size and evenly spaced around the square — three across the top, one at each side midpoint,
-  // three across the bottom.
+  /* Underglow first so it reads as sitting behind/around the keys. The eight LEDs tile the WHOLE
+   * perimeter with no gaps: each one is its own copy of the shared band path showing a single
+   * L/8 dash centred on its own ring point, so corner LEDs wrap symmetrically round the corner
+   * (L/16 down each adjoining side) and edge-midpoint LEDs lie flat on one side. `ug-edge` is a
+   * slightly wider copy underneath, which is what hover / selection / focus / unmapped paint —
+   * the band's own stroke is the LED colour and can't also carry a highlight. */
+  const bg = geom.ugBand;
+  const bands = [];
   for (const c of geom.ugCells) {
     const id = `${c.gx},${c.gy}`;
-    addGlow('ug', id, { x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.ug.r });
+    const gl = addGlow('ug', id, { class: 'ug-glow', d: bg.d, 'stroke-width': GEO.ug.thick }, 'path');
     const g = svgEl('g', { class: 'cell-g', tabindex: 0, role: 'button', 'data-zone': 'underglow', 'data-pos': id });
-    const rect = svgEl('rect', { class: 'ug-cell', x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.ug.r });
+    const edge = svgEl('path', { class: 'ug-edge', d: bg.d, 'stroke-width': GEO.ug.thick + 5 });
+    const rect = svgEl('path', { class: 'ug-band', d: bg.d, 'stroke-width': GEO.ug.thick });
     const idx = svgEl('text', { class: 'cell-idx', x: c.cx, y: c.cy + 4 });
-    g.append(rect, idx);
+    g.append(edge, rect, idx);
     svg.append(g);
-    svgRefs.ug.set(id, { g, rect, idx, cell: c });
+    svgRefs.ug.set(id, { g, rect, idx, glow: gl, cell: c });
+    bands.push({ c, parts: [rect, edge, gl] });
   }
+  /* Cut the shares from the path's OWN measured length, so what the dash engine tiles is exactly
+   * what was measured — the eight offsets are i*L/8 and the dash is L/8, which leaves no seam and
+   * no overlap by construction rather than by trigonometry. */
+  const ugL = pathLength(bands[0].parts[0], bg.L);
+  const ugSeg = ugL / UG_COUNT;
+  const ugDash = `${ugSeg.toFixed(4)} ${(ugL - ugSeg).toFixed(4)}`;
+  for (const { c, parts } of bands) {
+    const off = ((ugL - c.ringSlot * ugSeg) % ugL).toFixed(4);
+    for (const p of parts) {
+      p.setAttribute('stroke-dasharray', ugDash);
+      p.setAttribute('stroke-dashoffset', off);
+    }
+  }
+  assertBandTiling(bands[0].parts[0], ugL, geom.ugCells);
 
-  // The absent 9th slot of the 3x3 grid, at the same size as the eight that exist. Drawn BEHIND
-  // the keys, because that is where it would be and where the underglow physically sits: the
-  // dashes show through the gap between the four middle caps. The caption below spells it out.
+  // The absent 9th slot of the 3x3 grid, at the band's own thickness. Drawn BEHIND the keys,
+  // because that is where it would be and where the underglow physically sits: the dashes show
+  // through the gap between the four middle caps. The caption below spells it out.
   svg.append(svgEl('rect', {
     class: 'nocentre', x: geom.noCentre.x, y: geom.noCentre.y,
-    width: geom.noCentre.w, height: geom.noCentre.h, rx: GEO.ug.r,
+    width: geom.noCentre.w, height: geom.noCentre.h, rx: geom.noCentre.r,
   }));
 
   // The three non-key controls, so the board is recognisable as the real pad. They carry no LED,
@@ -1076,12 +1213,14 @@ function buildDevice() {
     }
   }
 
-  // Status LEDs: a vertical stack at the bottom-left, beside the touch pad.
+  /* Status LEDs: three small marks in a vertical column immediately LEFT of the touch pad and
+   * inside the key block's footprint, drawn last so they sit above the touch glyph's slot. Much
+   * smaller than a keycap, which is what they are — the duty number uses its own smaller type. */
   for (const c of geom.statusCells) {
     addGlow('st', String(c.i), { x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.status.r });
     const g = svgEl('g', { class: 'cell-g', tabindex: 0, role: 'button', 'data-zone': 'status', 'data-pos': String(c.i) });
     const rect = svgEl('rect', { class: 'st-cell', x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.status.r });
-    const idx = svgEl('text', { class: 'cell-idx', x: c.cx, y: c.cy + 4 });
+    const idx = svgEl('text', { class: 'cell-idx st-idx', x: c.cx, y: c.cy + 2.6 });
     g.append(rect, idx);
     svg.append(g);
     svgRefs.status.push({ g, rect, idx, cell: c });
@@ -1224,15 +1363,16 @@ function paint(frame) {
     const shown = sweeping === 'underglow' ? strip : i;
     const rgb = i === null ? [0.06, 0.07, 0.09] : frame.ug[i] || [0, 0, 0];
     const hex = '#' + rgbToHex(rgb);
-    ref.rect.setAttribute('fill', hex);
-    svgRefs.glow.get('ug:' + id).setAttribute('fill', hex);
+    // A share is a STROKED slice of the perimeter path, so its colour is its stroke.
+    ref.rect.setAttribute('stroke', hex);
+    ref.glow.setAttribute('stroke', hex);
     ref.idx.textContent = showIdx || sweeping === 'underglow' ? (shown === null ? '—' : String(shown)) : '';
     ref.idx.setAttribute('fill', inkFor(rgb));
     ref.g.dataset.unmapped = strip === null ? '1' : '0';
     ref.g.dataset.sel = sel && sel.zone === 'underglow' && sel.index === i ? '1' : '0';
     ref.g.setAttribute('aria-label',
       `underglow at grid x ${ref.cell.gx} y ${ref.cell.gy}` +
-      (i === null ? '' : `, ring position ${i}`) +
+      (i === null ? '' : `, ring position ${i}, an eighth of the board perimeter centred on that point`) +
       (strip === null ? ', no strip index mapped' : `, strip index ${strip}`) +
       `, colour ${rgbToHex(rgb)}`);
   }
@@ -1548,7 +1688,7 @@ function renderColorPanel() {
     keyBox.hidden = true; stBox.hidden = true;
   } else {
     nameEl.textContent = `status LED ${sel.index}`;
-    hintEl.textContent = 'Single-colour LED beside the touch pad at the bottom-left: 8-bit PWM duty, no hue.';
+    hintEl.textContent = 'Single-colour LED immediately left of the touch pad, at the key block’s bottom-left: 8-bit PWM duty, no hue.';
     ceLed.setEnabled(false);
     keyBox.hidden = true; stBox.hidden = false;
   }
@@ -3168,7 +3308,8 @@ function renderStageNote() {
   if (unstripped.length) bits.push(`no strip index maps to key index ${unstripped.join(', ')} — check layout.key_positions.`);
   if (!bits.length) {
     bits.push(`${total} switches under ${capCount} keycaps on a 4×4 grid (rows of ${g.rows.join('/')}), `
-      + '8 equal underglow LEDs around the edge, 3 PWM status LEDs beside the touch pad. '
+      + '8 underglow LEDs tiling the whole perimeter an eighth each (the corner four wrap their '
+      + 'corner), 3 PWM status LEDs left of the touch pad. '
       + 'Encoder, joystick and touch pad are drawn for orientation and carry no LED.');
   }
   $('stage-note').textContent = bits.join(' ');

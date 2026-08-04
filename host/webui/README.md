@@ -262,11 +262,29 @@ inventing geometry — `KEY_GRID_COLS`, `SHARED_KEYCAPS`, `FEATURES`, `UNDERGLOW
   LEDs*. The encoder and touch pad do carry bindings, so they take a pointer click into the
   Bindings panel (the chips there are the keyboard path) and they light up when their events
   arrive. The joystick has no triggers in schema v2 and stays completely inert.
-- **8 underglow LEDs, all the same size**, evenly spaced around the square (3×3 minus centre):
-  three across the top, one at each side midpoint, three across the bottom. The absent centre slot
-  is drawn dashed at the same size, behind the caps — which is where the underglow physically is.
-- **3 PWM status LEDs** are a vertical stack at the bottom-left beside the touch pad, where they
-  physically sit. Still 0–255 duty, single colour, not RGB.
+- **8 underglow LEDs tiling the WHOLE perimeter**, an eighth of its length each, with no gaps. The
+  eight ring positions (3×3 minus centre) are the four corners and four edge midpoints of the
+  square, so going clockwise they alternate corner, edge-midpoint, corner, edge-midpoint and every
+  adjacent pair is *exactly* ⅛ of the perimeter apart. Each LED therefore owns the ⅛ band **centred
+  on its own point**: the four edge-midpoint bands lie flat on one side, and the four corner bands
+  wrap their corner symmetrically — an L, ¹⁄₁₆ of the perimeter down each adjoining side. That is
+  wanted, not an artefact: real underglow diffuses around a corner. The absent centre slot is still
+  drawn dashed behind the caps, at the band's own thickness.
+  - **How.** The perimeter is defined once as a rounded-rect `<path>` and each LED is its own copy
+    of it showing a single dash — `stroke-dasharray: L/8, 7L/8` with `stroke-dashoffset` placing
+    that dash over its own eighth, `stroke-width` the band thickness, `stroke-linecap: butt` so
+    neighbours abut exactly. Equal shares and corner-wrapping fall out of arc length rather than
+    trigonometry, and every band stays an individually clickable, focusable, colourable element, so
+    selection, identify highlighting, live preview and the event feed all work on it unchanged.
+    `L` is the path's own `getTotalLength()`, and `assertBandTiling()` checks the eight offsets are
+    eight distinct eighths that sum to `L` and that each dash really is centred on its ring point.
+    A share's colour is its **stroke**, so hover / selection / focus / unmapped paint a slightly
+    wider sibling path underneath instead of the band's own stroke.
+- **3 PWM status LEDs** are three small marks in a vertical column immediately **left of the touch
+  pad**, inside the touch pad's own grid slot at the bottom-left of the key block — clearly smaller
+  than a keycap, inside the key footprint rather than below it, and well clear of the perimeter
+  band. The touch glyph is told how much of its slot they take and centres in what is left. Still
+  0–255 duty, single colour, not RGB.
 
 ### Three numbering schemes, and which one the UI shows
 

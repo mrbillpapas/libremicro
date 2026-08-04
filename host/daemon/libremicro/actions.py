@@ -20,6 +20,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,10 +34,20 @@ HOOK_ACTIONS = frozenset({"desk_up", "desk_down", "stand_sit"})
 
 #: Built-ins handled by synthesising the corresponding system media key.
 MEDIA_ACTIONS = {
-    "vol_up": "volume_up", "vol_down": "volume_down", "mute": "mute",
+    "mute": "mute",
     "play_pause": "play_pause", "next_track": "next_track", "prev_track": "prev_track",
     "bright_up": "brightness_up", "bright_down": "brightness_down",
 }
+
+#: Volume is deliberately NOT a media key. The system volume keys snap to macOS's 16-step
+#: grid — about 6.25% per press — which is fine for a keyboard and far too coarse for a
+#: rotary encoder, where a slow turn should feel continuous. Setting the level directly gives
+#: us any step size we like. The cost is losing the on-screen volume overlay, which is a
+#: trade worth making for a dial.
+VOLUME_STEP_DEFAULT = 3
+
+_VOL_GET = 'output volume of (get volume settings)'
+_VOL_MUTED = 'output muted of (get volume settings)'
 
 _warned: set[str] = set()
 
@@ -82,10 +93,14 @@ class Actions:
     """Executes bindings. `on_profile` and `on_reload` are supplied by the daemon, because
     profile switching and config reload are its business, not this module's."""
 
-    def __init__(self, on_profile=None, on_reload=None):
+    def __init__(self, on_profile=None, on_reload=None,
+                 volume_step: int = VOLUME_STEP_DEFAULT):
         self._on_profile = on_profile
         self._on_reload = on_reload
         self._lock = threading.Lock()
+        self.volume_step = volume_step
+        self._volume: int | None = None
+        self._volume_at = 0.0
 
     # --- entry point --------------------------------------------------------
 
@@ -162,6 +177,9 @@ class Actions:
         return self._spawn(["osascript", "-e", source], what="applescript")
 
     def action(self, token: str, ctx: Context) -> Result:
+        if token in ("vol_up", "vol_down"):
+            return self.nudge_volume(+1 if token == "vol_up" else -1)
+
         if token in MEDIA_ACTIONS:
             keys = self._keys()
             if keys is None:
@@ -194,6 +212,43 @@ class Actions:
             return Result(bool(self._on_reload()))
 
         return Result(False, f"unknown action token: {token!r}")
+
+    def nudge_volume(self, direction: int) -> Result:
+        """Move system volume by `volume_step` percent. Smooth enough for a dial.
+
+        The level is cached and advanced locally so a fast spin doesn't have to wait on an
+        osascript read per detent — reading takes tens of milliseconds, which a dial would
+        feel. The cache is refreshed whenever it's stale or absent, so anything that changes
+        volume elsewhere is picked up.
+        """
+        step = max(1, int(self.volume_step)) * (1 if direction >= 0 else -1)
+        with self._lock:
+            now = time.monotonic()
+            level = self._volume
+            if level is None or now - self._volume_at > 2.0:
+                level = self._read_volume()
+                if level is None:
+                    return Result(False, "could not read system volume")
+            level = max(0, min(100, level + step))
+            self._volume = level
+            self._volume_at = now
+
+        # Unmute on the way up, or raising volume from muted appears to do nothing.
+        script = f"set volume output volume {level}"
+        if direction > 0:
+            script += " without output muted"
+        return self._spawn(["osascript", "-e", script], what="set volume")
+
+    def _read_volume(self) -> int | None:
+        try:
+            out = subprocess.run(["osascript", "-e", _VOL_GET],
+                                 capture_output=True, text=True, timeout=2.0)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        try:
+            return max(0, min(100, int(out.stdout.strip())))
+        except ValueError:
+            return None
 
     # --- helpers ------------------------------------------------------------
 

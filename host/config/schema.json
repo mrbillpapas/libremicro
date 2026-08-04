@@ -5,41 +5,56 @@
   "description": "Declarative config for the LibreMicro host daemon: per-trigger bindings (launch / keyboard shortcut / script / mode / built-in action), lighting palettes and effects, profiles, device layout, and power settings. Designed to be generated and edited by an AI from this schema, and to be the single source of truth the local web UI edits.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "profiles"],
+  "required": [
+    "version",
+    "profiles"
+  ],
   "properties": {
     "version": {
       "description": "Config format version. 2 is current; v1 configs are migrated automatically on load.",
       "const": 2
     },
-    "device": { "$ref": "#/$defs/device" },
-    "layout": { "$ref": "#/$defs/layout" },
+    "device": {
+      "$ref": "#/$defs/device"
+    },
+    "layout": {
+      "$ref": "#/$defs/layout"
+    },
     "palettes": {
       "description": "Named colour palettes available to effects, in addition to the built-in corpus. Built-ins with the same name are overridden.",
       "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/palette" }
+      "additionalProperties": {
+        "$ref": "#/$defs/palette"
+      }
     },
     "profiles": {
       "description": "Named configurations. At least one is required; the one named by active_profile is loaded at startup.",
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": { "$ref": "#/$defs/profile" }
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
     },
     "active_profile": {
       "description": "Name of the profile to load at startup. Defaults to 'default' if present, else the first profile.",
       "type": "string"
     },
-    "power": { "$ref": "#/$defs/power" },
-    "webui": { "$ref": "#/$defs/webui" },
-    "agent": { "$ref": "#/$defs/agent" }
+    "power": {
+      "$ref": "#/$defs/power"
+    },
+    "webui": {
+      "$ref": "#/$defs/webui"
+    },
+    "agent": {
+      "$ref": "#/$defs/agent"
+    }
   },
-
   "$defs": {
     "color": {
       "description": "RGB hex, 'rrggbb' (no leading #).",
       "type": "string",
       "pattern": "^[0-9a-fA-F]{6}$"
     },
-
     "device": {
       "type": "object",
       "additionalProperties": false,
@@ -49,36 +64,65 @@
           "type": "string",
           "default": "auto"
         },
-        "baud": { "type": "integer", "default": 115200 },
+        "baud": {
+          "type": "integer",
+          "default": 115200
+        },
         "brightness": {
           "description": "Global brightness scale for the addressable LEDs (0-255).",
-          "type": "integer", "minimum": 0, "maximum": 255, "default": 200
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 200
         },
         "fps": {
           "description": "Frame rate for animated effects. The link is ASCII over USB serial, so keep this modest.",
-          "type": "number", "minimum": 1, "maximum": 60, "default": 30
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 30
         },
         "hold_ms": {
           "description": "How long a control must be held before its 'hold' binding fires. A hold that fires suppresses the 'press' that release would otherwise produce.",
-          "type": "integer", "minimum": 50, "maximum": 5000, "default": 450
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 5000,
+          "default": 450
         },
         "double_ms": {
           "description": "Double-tap window. Note the cost: a control with a 'double' binding cannot fire 'press' until this window has elapsed, so binding 'double' makes that key feel less immediate. Keys with no 'double' binding fire 'press' instantly regardless of this value.",
-          "type": "integer", "minimum": 50, "maximum": 2000, "default": 280
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 2000,
+          "default": 280
+        },
+        "volume_step": {
+          "description": "Percent of system volume per vol_up/vol_down. Volume deliberately bypasses the media keys, which snap to macOS's 16-step grid (~6.25% a press) \u2014 far too coarse for a rotary dial. Lower this for a finer feel; the trade is losing the on-screen volume overlay.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25,
+          "default": 3
         }
       }
     },
-
     "layout": {
-      "description": "Physical geometry of the LEDs. The strip-index-to-physical-position mapping is CONFIRMED on hardware (a serpentine starting at the bottom-right — see docs/HARDWARE.md) and ships as a built-in default, because every Creator Micro 2 is wired identically. Everything here is therefore optional: supply it only to override the default for a unit that differs, and set verified: false alongside an override you haven't checked.",
+      "description": "Physical geometry of the LEDs. The strip-index-to-physical-position mapping is CONFIRMED on hardware (a serpentine starting at the bottom-right \u2014 see docs/HARDWARE.md) and ships as a built-in default, because every Creator Micro 2 is wired identically. Everything here is therefore optional: supply it only to override the default for a unit that differs, and set verified: false alongside an override you haven't checked.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "key_rows": {
           "description": "Number of key caps per physical row, top to bottom. The CM2 is [2,4,4,3] = 13.",
           "type": "array",
-          "items": { "type": "integer", "minimum": 1 },
-          "default": [2, 4, 4, 3]
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "default": [
+            2,
+            4,
+            4,
+            3
+          ]
         },
         "key_positions": {
           "description": "Physical position of each per-key strip index. Element i is [row, col] for strip index i (GPIO 7, order 0->12). null means not yet determined.",
@@ -86,8 +130,18 @@
           "maxItems": 13,
           "items": {
             "oneOf": [
-              { "type": "null" },
-              { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0 } }
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
             ]
           }
         },
@@ -97,55 +151,93 @@
           "maxItems": 8,
           "items": {
             "oneOf": [
-              { "type": "null" },
-              { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0, "maximum": 2 } }
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2
+                }
+              }
             ]
           }
         },
         "verified": {
-          "description": "Whether the mapping in use has been confirmed against the physical device. Defaults to true, because the shipped default IS confirmed. Set it false only when supplying an override you haven't checked — that's what re-enables the 'unverified mapping' warning in the web UI.",
-          "type": "boolean", "default": true
+          "description": "Whether the mapping in use has been confirmed against the physical device. Defaults to true, because the shipped default IS confirmed. Set it false only when supplying an override you haven't checked \u2014 that's what re-enables the 'unverified mapping' warning in the web UI.",
+          "type": "boolean",
+          "default": true
         }
       }
     },
-
     "palette": {
       "description": "A gradient defined by colour stops, compatible in spirit with WLED custom palettes. Stops are sorted by pos on load; a single stop yields a solid colour.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["stops"],
+      "required": [
+        "stops"
+      ],
       "properties": {
-        "label": { "type": "string" },
+        "label": {
+          "type": "string"
+        },
         "stops": {
           "type": "array",
           "minItems": 1,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["pos", "color"],
+            "required": [
+              "pos",
+              "color"
+            ],
             "properties": {
-              "pos": { "description": "Position along the gradient, 0..1.", "type": "number", "minimum": 0, "maximum": 1 },
-              "color": { "$ref": "#/$defs/color" }
+              "pos": {
+                "description": "Position along the gradient, 0..1.",
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "color": {
+                "$ref": "#/$defs/color"
+              }
             }
           }
         },
         "cyclic": {
           "description": "If true the gradient wraps (last stop interpolates back to the first), which is what ring and rainbow effects want.",
-          "type": "boolean", "default": false
+          "type": "boolean",
+          "default": false
         }
       }
     },
-
     "effect": {
       "description": "An animated lighting layer rendered on the host and streamed to the device.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "properties": {
         "name": {
           "description": "Built-in effect name.",
           "type": "string",
-          "enum": ["solid", "gradient", "rainbow", "breathe", "chase", "ripple", "sparkle", "wipe", "comet", "off"]
+          "enum": [
+            "solid",
+            "gradient",
+            "rainbow",
+            "breathe",
+            "chase",
+            "ripple",
+            "sparkle",
+            "wipe",
+            "comet",
+            "off"
+          ]
         },
         "palette": {
           "description": "Palette name (built-in or from the palettes map) the effect samples its colours from.",
@@ -153,34 +245,56 @@
         },
         "speed": {
           "description": "Animation rate. 0 is static; 1 is one full cycle per second.",
-          "type": "number", "minimum": 0, "maximum": 10, "default": 0.3
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 0.3
         },
         "intensity": {
           "description": "Effect-specific magnitude (spread, density, tail length) as a 0..1 fraction.",
-          "type": "number", "minimum": 0, "maximum": 1, "default": 0.5
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.5
         },
         "direction": {
           "description": "Spatial direction for directional effects.",
           "type": "string",
-          "enum": ["horizontal", "vertical", "radial", "ring"],
+          "enum": [
+            "horizontal",
+            "vertical",
+            "radial",
+            "ring"
+          ],
           "default": "horizontal"
         },
-        "reverse": { "type": "boolean", "default": false },
+        "reverse": {
+          "type": "boolean",
+          "default": false
+        },
         "target": {
           "description": "Which LED zone this effect renders to.",
           "type": "string",
-          "enum": ["keys", "underglow", "all"],
+          "enum": [
+            "keys",
+            "underglow",
+            "all"
+          ],
           "default": "all"
         },
         "blend": {
           "description": "How the effect composites over the base layer of per-key colours.",
           "type": "string",
-          "enum": ["replace", "multiply", "screen", "overlay"],
+          "enum": [
+            "replace",
+            "multiply",
+            "screen",
+            "overlay"
+          ],
           "default": "replace"
         }
       }
     },
-
     "binding": {
       "description": "What a trigger does. Exactly one action key must be present; the optional flash gives visual confirmation.",
       "type": "object",
@@ -222,14 +336,33 @@
           "description": "Built-in action token the daemon implements natively.",
           "type": "string",
           "enum": [
-            "vol_up", "vol_down", "mute", "play_pause", "next_track", "prev_track",
-            "bright_up", "bright_down",
-            "desk_up", "desk_down", "stand_sit",
-            "sleep", "lock", "profile_next", "profile_prev", "reload_config",
-            "agent_approve", "agent_deny",
-            "agent_session_next", "agent_session_prev", "agent_session_focus",
-            "agent_effort_up", "agent_effort_down", "agent_effort_apply",
-            "agent_dictate_start", "agent_dictate_stop", "agent_dictate"
+            "vol_up",
+            "vol_down",
+            "mute",
+            "play_pause",
+            "next_track",
+            "prev_track",
+            "bright_up",
+            "bright_down",
+            "desk_up",
+            "desk_down",
+            "stand_sit",
+            "sleep",
+            "lock",
+            "profile_next",
+            "profile_prev",
+            "reload_config",
+            "agent_approve",
+            "agent_deny",
+            "agent_session_next",
+            "agent_session_prev",
+            "agent_session_focus",
+            "agent_effort_up",
+            "agent_effort_down",
+            "agent_effort_apply",
+            "agent_dictate_start",
+            "agent_dictate_stop",
+            "agent_dictate"
           ]
         },
         "flash": {
@@ -238,97 +371,175 @@
         }
       },
       "oneOf": [
-        { "required": ["launch"] },
-        { "required": ["shortcut"] },
-        { "required": ["text"] },
-        { "required": ["shell"] },
-        { "required": ["script"] },
-        { "required": ["applescript"] },
-        { "required": ["mode"] },
-        { "required": ["profile"] },
-        { "required": ["action"] }
+        {
+          "required": [
+            "launch"
+          ]
+        },
+        {
+          "required": [
+            "shortcut"
+          ]
+        },
+        {
+          "required": [
+            "text"
+          ]
+        },
+        {
+          "required": [
+            "shell"
+          ]
+        },
+        {
+          "required": [
+            "script"
+          ]
+        },
+        {
+          "required": [
+            "applescript"
+          ]
+        },
+        {
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "required": [
+            "profile"
+          ]
+        },
+        {
+          "required": [
+            "action"
+          ]
+        }
       ]
     },
-
     "triggers": {
       "description": "Bindings for the ways a control can be actuated. Omitted kinds do nothing.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "press":   { "$ref": "#/$defs/binding" },
-        "release": { "$ref": "#/$defs/binding" },
-        "hold":    { "$ref": "#/$defs/binding" },
-        "double":  { "$ref": "#/$defs/binding" }
+        "press": {
+          "$ref": "#/$defs/binding"
+        },
+        "release": {
+          "$ref": "#/$defs/binding"
+        },
+        "hold": {
+          "$ref": "#/$defs/binding"
+        },
+        "double": {
+          "$ref": "#/$defs/binding"
+        }
       }
     },
-
     "key": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["index"],
+      "required": [
+        "index"
+      ],
       "properties": {
         "index": {
           "description": "Per-key LED / matrix index, 0-12.",
-          "type": "integer", "minimum": 0, "maximum": 12
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
         },
-        "label": { "type": "string" },
+        "label": {
+          "type": "string"
+        },
         "color": {
           "description": "Base colour for this key's LED.",
           "$ref": "#/$defs/color"
         },
-        "on": { "$ref": "#/$defs/triggers" },
-        "watch": { "$ref": "#/$defs/watch" }
+        "on": {
+          "$ref": "#/$defs/triggers"
+        },
+        "watch": {
+          "$ref": "#/$defs/watch"
+        }
       }
     },
-
     "watch": {
       "description": "A background watcher that pulses this key's LED on external state.",
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "flash"],
+      "required": [
+        "type",
+        "flash"
+      ],
       "properties": {
         "type": {
           "description": "Watcher kind. 'slack_unread' and 'unread_badge' are examples; the daemon defines the available kinds.",
           "type": "string"
         },
-        "flash": { "$ref": "#/$defs/color" },
-        "interval_s": { "type": "number", "minimum": 1, "default": 15 }
+        "flash": {
+          "$ref": "#/$defs/color"
+        },
+        "interval_s": {
+          "type": "number",
+          "minimum": 1,
+          "default": 15
+        }
       }
     },
-
     "encoder": {
       "description": "Rotary encoder bindings. cw/ccw fire per detent.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cw":    { "$ref": "#/$defs/binding" },
-        "ccw":   { "$ref": "#/$defs/binding" },
-        "press": { "$ref": "#/$defs/binding" }
+        "cw": {
+          "$ref": "#/$defs/binding"
+        },
+        "ccw": {
+          "$ref": "#/$defs/binding"
+        },
+        "press": {
+          "$ref": "#/$defs/binding"
+        }
       }
     },
-
     "mode": {
       "description": "A named mode. Activating it flashes its key, rebinds the encoder, and optionally recolours the pad.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["encoder"],
+      "required": [
+        "encoder"
+      ],
       "properties": {
-        "activate_key": { "type": "integer", "minimum": 0, "maximum": 12 },
-        "flash": { "$ref": "#/$defs/color" },
-        "encoder": { "$ref": "#/$defs/encoder" },
+        "activate_key": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
+        },
+        "flash": {
+          "$ref": "#/$defs/color"
+        },
+        "encoder": {
+          "$ref": "#/$defs/encoder"
+        },
         "keys": {
           "description": "Per-key overrides that apply only while this mode is active.",
           "type": "array",
-          "items": { "$ref": "#/$defs/key" }
+          "items": {
+            "$ref": "#/$defs/key"
+          }
         },
-        "lighting": { "$ref": "#/$defs/lighting" },
+        "lighting": {
+          "$ref": "#/$defs/lighting"
+        },
         "timeout_s": {
           "description": "Revert to the default encoder binding after this long with no encoder activity. Omit to stay until switched.",
-          "type": "number", "minimum": 1
+          "type": "number",
+          "minimum": 1
         }
       }
     },
-
     "lighting": {
       "type": "object",
       "additionalProperties": false,
@@ -339,18 +550,26 @@
         },
         "status_leds": {
           "description": "PWM duty (0-255) for the three single-colour status LEDs.",
-          "type": "array", "maxItems": 3,
-          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
         },
-        "effect": { "$ref": "#/$defs/effect" }
+        "effect": {
+          "$ref": "#/$defs/effect"
+        }
       }
     },
-
     "profile": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "label": { "type": "string" },
+        "label": {
+          "type": "string"
+        },
         "auto_activate_app": {
           "description": "Switch to this profile automatically when this application becomes frontmost.",
           "type": "string"
@@ -358,22 +577,31 @@
         "keys": {
           "description": "Per-key bindings. index 0-12 maps to the 13 physical keys.",
           "type": "array",
-          "items": { "$ref": "#/$defs/key" }
+          "items": {
+            "$ref": "#/$defs/key"
+          }
         },
         "encoder": {
           "description": "Encoder binding when no mode is active.",
           "$ref": "#/$defs/encoder"
         },
-        "touch": { "$ref": "#/$defs/triggers" },
-        "rear":  { "$ref": "#/$defs/triggers" },
+        "touch": {
+          "$ref": "#/$defs/triggers"
+        },
+        "rear": {
+          "$ref": "#/$defs/triggers"
+        },
         "modes": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/mode" }
+          "additionalProperties": {
+            "$ref": "#/$defs/mode"
+          }
         },
-        "lighting": { "$ref": "#/$defs/lighting" }
+        "lighting": {
+          "$ref": "#/$defs/lighting"
+        }
       }
     },
-
     "power": {
       "description": "Idle and power behaviour. Enforced on-device so it still works with no host attached; these values are pushed to the firmware.",
       "type": "object",
@@ -381,102 +609,190 @@
       "properties": {
         "idle_dim_after_s": {
           "description": "Dim the LEDs after this long with no input. 0 disables.",
-          "type": "number", "minimum": 0, "default": 120
+          "type": "number",
+          "minimum": 0,
+          "default": 120
         },
         "dim_brightness": {
-          "type": "integer", "minimum": 0, "maximum": 255, "default": 40
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "default": 40
         },
         "idle_off_after_s": {
           "description": "Turn the LEDs off entirely after this long with no input. 0 disables.",
-          "type": "number", "minimum": 0, "default": 600
+          "type": "number",
+          "minimum": 0,
+          "default": 600
         },
         "deep_sleep_after_s": {
           "description": "Deep-sleep the device after this long with no input. Any input wakes it. 0 disables.",
-          "type": "number", "minimum": 0, "default": 1800
+          "type": "number",
+          "minimum": 0,
+          "default": 1800
         },
         "on_battery": {
           "description": "Overrides applied when running on battery rather than USB power.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "idle_dim_after_s":   { "type": "number", "minimum": 0 },
-            "dim_brightness":     { "type": "integer", "minimum": 0, "maximum": 255 },
-            "idle_off_after_s":   { "type": "number", "minimum": 0 },
-            "deep_sleep_after_s": { "type": "number", "minimum": 0 },
-            "brightness":         { "type": "integer", "minimum": 0, "maximum": 255 }
+            "idle_dim_after_s": {
+              "type": "number",
+              "minimum": 0
+            },
+            "dim_brightness": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "idle_off_after_s": {
+              "type": "number",
+              "minimum": 0
+            },
+            "deep_sleep_after_s": {
+              "type": "number",
+              "minimum": 0
+            },
+            "brightness": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
           }
         },
         "power_button": {
           "description": "Which control long-presses to power the device off. Pending the rear-button / ext0-wake pin conflict noted in docs/HARDWARE.md.",
           "type": "string",
-          "enum": ["rear", "encoder", "none"],
+          "enum": [
+            "rear",
+            "encoder",
+            "none"
+          ],
           "default": "rear"
         },
         "power_off_hold_ms": {
-          "type": "integer", "minimum": 200, "default": 2000
+          "type": "integer",
+          "minimum": 200,
+          "default": 2000
         }
       }
     },
-
     "agent": {
-      "description": "Agentic-coding control surface (docs/AGENT-SURFACE.md). Status arrives from Claude Code hooks POSTing to /api/agent/status; nothing here polls. Every field is optional with a working default. Note *_key fields are DISPLAY roles — they say which key to illuminate; binding the action is separate, under profiles.*.keys[].on.",
+      "description": "Agentic-coding control surface (docs/AGENT-SURFACE.md). Status arrives from Claude Code hooks POSTing to /api/agent/status; nothing here polls. Every field is optional with a working default. Note *_key fields are DISPLAY roles \u2014 they say which key to illuminate; binding the action is separate, under profiles.*.keys[].on.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
-        "harness": { "type": "string", "default": "claude-code" },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "harness": {
+          "type": "string",
+          "default": "claude-code"
+        },
         "status_key": {
           "description": "Shows the selected session's status.",
-          "type": "integer", "minimum": 0, "maximum": 12
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
         },
         "alert_key": {
           "description": "Pulses when a session OTHER than the displayed one is waiting, so a background session can't hijack the main display.",
-          "type": "integer", "minimum": 0, "maximum": 12
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
         },
-        "approve_key": { "type": "integer", "minimum": 0, "maximum": 12 },
-        "deny_key": { "type": "integer", "minimum": 0, "maximum": 12 },
-        "dictate_key": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "approve_key": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
+        },
+        "deny_key": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
+        },
+        "dictate_key": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12
+        },
         "effort_keys": {
           "description": "The effort ladder rendered as a bar.",
-          "type": "array", "maxItems": 5,
-          "items": { "type": "integer", "minimum": 0, "maximum": 12 }
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 12
+          }
         },
         "stale_after_s": {
-          "description": "Working/waiting decays to unknown after this long with no report — catches a session killed mid-turn. 'idle' deliberately does not expire, since silence is what idle predicts.",
-          "type": "number", "minimum": 1, "default": 90
+          "description": "Working/waiting decays to unknown after this long with no report \u2014 catches a session killed mid-turn. 'idle' deliberately does not expire, since silence is what idle predicts.",
+          "type": "number",
+          "minimum": 1,
+          "default": 90
         },
         "session_ttl_s": {
           "description": "Forget a session entirely after this long with no report.",
-          "type": "number", "minimum": 1, "default": 1800
+          "type": "number",
+          "minimum": 1,
+          "default": 1800
         },
         "done_hold_s": {
           "description": "How long 'done' shows before decaying to idle.",
-          "type": "number", "minimum": 0, "default": 10
+          "type": "number",
+          "minimum": 0,
+          "default": 10
         },
-        "follow_active": { "type": "boolean", "default": true },
+        "follow_active": {
+          "type": "boolean",
+          "default": true
+        },
         "prioritise_waiting": {
           "description": "A waiting session wins the display over the merely-active one.",
-          "type": "boolean", "default": true
+          "type": "boolean",
+          "default": true
         },
         "require_waiting": {
           "description": "Only allow approve/deny while the session reports 'waiting'. Keep this true: a keystroke cannot be addressed to a session, so an unguarded approve key is a blind Return into whatever is frontmost.",
-          "type": "boolean", "default": true
+          "type": "boolean",
+          "default": true
         },
         "focus_first": {
           "description": "Run the focus hook before sending keys.",
-          "type": "boolean", "default": false
+          "type": "boolean",
+          "default": false
         },
-        "focus_delay_ms": { "type": "integer", "minimum": 0, "default": 250 },
-        "approve": { "$ref": "#/$defs/agent_keystroke" },
-        "deny": { "$ref": "#/$defs/agent_keystroke" },
+        "focus_delay_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 250
+        },
+        "approve": {
+          "$ref": "#/$defs/agent_keystroke"
+        },
+        "deny": {
+          "$ref": "#/$defs/agent_keystroke"
+        },
         "effort": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "levels": { "type": "array", "items": { "type": "string" } },
+            "levels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "apply": {
-              "description": "How a chosen effort level is applied. Claude Code exposes no way to set effort on a live session from outside, so 'slash_command' types one into the focused session and 'none' makes the dial read-only — which is the honest choice if you'd rather have no action than a fragile one.",
-              "type": "string", "enum": ["slash_command", "none"], "default": "slash_command"
+              "description": "How a chosen effort level is applied. Claude Code exposes no way to set effort on a live session from outside, so 'slash_command' types one into the focused session and 'none' makes the dial read-only \u2014 which is the honest choice if you'd rather have no action than a fragile one.",
+              "type": "string",
+              "enum": [
+                "slash_command",
+                "none"
+              ],
+              "default": "slash_command"
             }
           }
         },
@@ -484,54 +800,101 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "unknown": { "$ref": "#/$defs/color" },
-            "idle":    { "$ref": "#/$defs/color" },
-            "working": { "$ref": "#/$defs/color" },
-            "waiting": { "$ref": "#/$defs/color" },
-            "error":   { "$ref": "#/$defs/color" },
-            "done":    { "$ref": "#/$defs/color" }
+            "unknown": {
+              "$ref": "#/$defs/color"
+            },
+            "idle": {
+              "$ref": "#/$defs/color"
+            },
+            "working": {
+              "$ref": "#/$defs/color"
+            },
+            "waiting": {
+              "$ref": "#/$defs/color"
+            },
+            "error": {
+              "$ref": "#/$defs/color"
+            },
+            "done": {
+              "$ref": "#/$defs/color"
+            }
           }
         },
         "dictation": {
-          "description": "Push-to-dictate: hold a key to record, release to transcribe and type. Bind to 'hold'/'release', not 'press' — press fires on key release, so hold is the only kind that fires while the key is down.",
+          "description": "Push-to-dictate: hold a key to record, release to transcribe and type. Bind to 'hold'/'release', not 'press' \u2014 press fires on key release, so hold is the only kind that fires while the key is down.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
-            "whisper_bin": { "type": "string", "default": "auto" },
-            "ffmpeg_bin": { "type": "string", "default": "ffmpeg" },
-            "model": { "type": "string", "default": "auto" },
-            "audio_device": { "type": "string", "default": ":0" },
-            "language": { "type": "string", "default": "en" },
-            "threads": { "type": "integer", "minimum": 1, "default": 4 },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "whisper_bin": {
+              "type": "string",
+              "default": "auto"
+            },
+            "ffmpeg_bin": {
+              "type": "string",
+              "default": "ffmpeg"
+            },
+            "model": {
+              "type": "string",
+              "default": "auto"
+            },
+            "audio_device": {
+              "type": "string",
+              "default": ":0"
+            },
+            "language": {
+              "type": "string",
+              "default": "en"
+            },
+            "threads": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 4
+            },
             "max_seconds": {
               "description": "Caps a stuck key. 0 disables the cap.",
-              "type": "number", "minimum": 0, "default": 60
+              "type": "number",
+              "minimum": 0,
+              "default": 60
             }
           }
         }
       }
     },
-
     "agent_keystroke": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "shortcut": { "type": "string" },
-        "text": { "type": "string" }
+        "shortcut": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
       }
     },
-
     "webui": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
         "host": {
           "description": "Bind address. Keep this on loopback unless you have a specific reason not to.",
-          "type": "string", "default": "127.0.0.1"
+          "type": "string",
+          "default": "127.0.0.1"
         },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 8777 }
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8777
+        }
       }
     }
   }

@@ -39,7 +39,8 @@ class Dispatcher:
         # clocks — which silently broke mode timeouts and is untestable.
         self._now = time.monotonic()
         self.actions = Actions(on_profile=self.switch_profile,
-                               on_reload=self._reload)
+                               on_reload=self._reload,
+                               volume_step=int(self.cfg.device.get("volume_step", 3)))
         self.recognizer = events.Recognizer(
             emit=self.handle, is_bound=self.is_bound,
             hold_ms=int(self.cfg.device.get("hold_ms", events.DEFAULT_HOLD_MS)),

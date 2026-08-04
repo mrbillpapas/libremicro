@@ -70,6 +70,7 @@
 #include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
+#include "driver/gpio_filter.h"
 #include "driver/i2c_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
@@ -172,6 +173,31 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 #define LM_ENABLE_UNVERIFIED_INPUTS 0
 #endif
 
+// The three aux inputs are now separately gated, because they no longer carry the same
+// risk. Their pins are all CONFIRMED (docs/PIN-VERIFICATION.md), and all three are read
+// as inputs and never driven — so a wrong pin could only produce spurious events, not
+// damage. The rear button is the exception, and not because of its pin:
+//
+//   GPIO 2 is also stock's ext0 wake pin, and stock's rear-button "rescue" arms a
+//   ULP-RISCV watcher that forces SW_SYS_RST when it sees that pin go low. That watcher
+//   is armed by the sys.bootloader RPC — which is exactly what our own flashing script
+//   calls — so it may well be live right now. With it running, pressing the rear button
+//   reboots the pad. We halt the ULP at boot (see aux_inputs_start) but that is a
+//   mitigation, not a proof, so REAR stays opt-in until someone confirms it on hardware.
+//
+// LM_ENABLE_UNVERIFIED_INPUTS=1 still turns everything on, for compatibility.
+#ifndef LM_ENABLE_ENCODER
+#define LM_ENABLE_ENCODER (LM_ENABLE_UNVERIFIED_INPUTS ? 1 : 1)
+#endif
+#ifndef LM_ENABLE_TOUCH
+#define LM_ENABLE_TOUCH   (LM_ENABLE_UNVERIFIED_INPUTS ? 1 : 1)
+#endif
+#ifndef LM_ENABLE_REAR
+#define LM_ENABLE_REAR    (LM_ENABLE_UNVERIFIED_INPUTS ? 1 : 0)
+#endif
+
+#define LM_ENABLE_AUX (LM_ENABLE_ENCODER || LM_ENABLE_TOUCH || LM_ENABLE_REAR)
+
 // Pin numbers, now RESOLVED from the vendor firmware — see docs/PIN-VERIFICATION.md
 // for the evidence (3-5 independent attestations per pin).
 //
@@ -194,8 +220,19 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 // touching, flip this to 0.
 #define LM_TOUCH_ACTIVE_HIGH 1
 
-// Quadrature transitions per detent. Typical detented encoders give 4; unverified.
+// Quadrature transitions per detent. An EC11-style detented encoder gives 4 edges per
+// click; if one physical click produces several events, lower this, and if it takes several
+// clicks to produce one event, raise it.
+#ifndef LM_ENC_STEPS_PER_DETENT
 #define LM_ENC_STEPS_PER_DETENT 4
+#endif
+
+// Direction invert, mirroring stock's own u8[13] flag. Which rotation is physically
+// clockwise depends on PCB wiring and is NOT in the vendor firmware, so this is the one
+// knob that can only be set by turning the knob. Flip it if cw/ccw come out backwards.
+#ifndef LM_ENC_INVERT
+#define LM_ENC_INVERT 0
+#endif
 
 #define LM_AUX_POLL_MS  2    // poll period for the guarded inputs
 #define LM_AUX_TAP_MS   150  // min gap between touch/rear reports, anti-chatter
@@ -741,21 +778,45 @@ static void mtx_scan_task(void *arg)
 // the top of the file for why. Emits, per docs/PROTOCOL.md:
 //   enc cw | enc ccw | enc press | enc release | touch down/up | rear down/up
 
-#if LM_ENABLE_UNVERIFIED_INPUTS
+#if LM_ENABLE_AUX
 
-#if LM_PIN_ENC_B < 0 || LM_PIN_ENC_SW < 0
-#warning "LM_ENABLE_UNVERIFIED_INPUTS=1 but encoder B/switch pins are still -1: \
-the encoder will be skipped at runtime. Fill in LM_PIN_ENC_B / LM_PIN_ENC_SW."
-#endif
-
-// Quadrature state table: index = (prev_ab << 2) | cur_ab, where ab = (A<<1)|B.
-// +1 / -1 for a valid step, 0 for no-change or an illegal double transition.
+// Quadrature decode, matched to what stock v0.6.1 actually does. The vendor's decoder was
+// fully recovered (docs/PIN-VERIFICATION.md) and the differences from a naive implementation
+// are exactly the things that make a naive one feel wonky:
+//
+//   1. State is (B << 1) | A, not (A << 1) | B. Getting this backwards inverts direction.
+//   2. On a direction REVERSAL the accumulator is reset to the new step rather than added
+//      to. Without this, jitter either side of a detent accumulates and eventually fakes a
+//      step you never made — the main source of phantom events.
+//   3. After emitting, the accumulator is zeroed, not decremented by the threshold. Keeping
+//      a remainder lets error carry forward between detents.
+//
+// The table is the classic 16-entry form, indexed prev*4 + now, taken from DROM 0x3c201bf4.
 static const int8_t LM_QUAD_LUT[16] = {
      0, -1,  1,  0,
      1,  0,  0, -1,
     -1,  0,  0,  1,
      0,  1, -1,  0,
 };
+
+// Stock installs a hardware pin glitch filter on every one of these inputs
+// (docs/PIN-VERIFICATION.md). It is not decoration: an EC11 encoder's contacts bounce, and
+// each bounce is an edge the quadrature decoder has to either filter or mis-count. Doing it
+// in the GPIO peripheral costs nothing and removes the bounce before software ever sees it.
+static void aux_install_glitch_filter(int pin)
+{
+    if (pin < 0) return;
+    gpio_glitch_filter_handle_t filt = NULL;
+    gpio_pin_glitch_filter_config_t cfg = {
+        .clk_src = GLITCH_FILTER_CLK_SRC_DEFAULT,
+        .gpio_num = pin,
+    };
+    if (gpio_new_pin_glitch_filter(&cfg, &filt) == ESP_OK && filt) {
+        gpio_glitch_filter_enable(filt);
+    } else {
+        out_line("# warn glitch filter unavailable on GPIO %d\n", pin);
+    }
+}
 
 static void aux_cfg_input(int pin, gpio_pulldown_t pd, gpio_pullup_t pu)
 {
@@ -769,18 +830,24 @@ static void aux_cfg_input(int pin, gpio_pulldown_t pd, gpio_pullup_t pu)
         .intr_type    = GPIO_INTR_DISABLE,
     };
     gpio_config(&io);
+    aux_install_glitch_filter(pin);
 }
 
 static void aux_task(void *arg)
 {
     (void)arg;
-    const bool have_enc    = (LM_PIN_ENC_A >= 0 && LM_PIN_ENC_B >= 0);
-    const bool have_enc_sw = (LM_PIN_ENC_SW >= 0);
+    const bool have_enc    = LM_ENABLE_ENCODER && LM_PIN_ENC_A >= 0 && LM_PIN_ENC_B >= 0;
+    const bool have_enc_sw = LM_ENABLE_ENCODER && LM_PIN_ENC_SW >= 0;
+    const bool have_touch  = LM_ENABLE_TOUCH;
+    const bool have_rear   = LM_ENABLE_REAR;
 
     uint8_t prev_ab = 0;
     int32_t accum = 0;
-    // Touch and rear are assumed ACTIVE-LOW (idle high via pull-up). Unverified.
-    uint8_t sw_state = 1, touch_state = 1, rear_state = 1;
+    // Seed from the ACTUAL pin levels. Assuming idle-high made the very first poll look
+    // like a transition, which emitted a phantom `touch up` on every boot.
+    uint8_t sw_state   = have_enc_sw ? (uint8_t)gpio_get_level(LM_PIN_ENC_SW) : 1;
+    uint8_t touch_state = have_touch ? (uint8_t)gpio_get_level(LM_PIN_TOUCH) : 1;
+    uint8_t rear_state  = have_rear  ? (uint8_t)gpio_get_level(LM_PIN_REAR)  : 1;
     TickType_t last_touch = 0, last_rear = 0;
 
     if (have_enc) {
@@ -791,18 +858,24 @@ static void aux_task(void *arg)
         TickType_t now = xTaskGetTickCount();
 
         if (have_enc) {
-            uint8_t ab = (uint8_t)((gpio_get_level(LM_PIN_ENC_A) << 1)
-                                   | gpio_get_level(LM_PIN_ENC_B));
+            // (B << 1) | A — stock's ordering. See LM_QUAD_LUT above.
+            uint8_t ab = (uint8_t)((gpio_get_level(LM_PIN_ENC_B) << 1)
+                                   | gpio_get_level(LM_PIN_ENC_A));
             if (ab != prev_ab) {
-                accum += LM_QUAD_LUT[(prev_ab << 2) | ab];
+                const int8_t raw = LM_QUAD_LUT[(prev_ab << 2) | ab];
                 prev_ab = ab;
-                while (accum >= LM_ENC_STEPS_PER_DETENT) {
-                    accum -= LM_ENC_STEPS_PER_DETENT;
-                    out_line("enc cw\n");
-                }
-                while (accum <= -LM_ENC_STEPS_PER_DETENT) {
-                    accum += LM_ENC_STEPS_PER_DETENT;
-                    out_line("enc ccw\n");
+                if (raw != 0) {                     // 0 = illegal double transition, ignore
+                    if (accum != 0 && ((raw > 0) != (accum > 0))) {
+                        accum = raw;                // reversal resets, per stock
+                    } else {
+                        accum += raw;
+                    }
+                    if (accum >= LM_ENC_STEPS_PER_DETENT
+                            || accum <= -LM_ENC_STEPS_PER_DETENT) {
+                        const bool cw = (accum > 0) != (LM_ENC_INVERT != 0);
+                        accum = 0;                  // zero, don't carry a remainder
+                        out_line(cw ? "enc cw\n" : "enc ccw\n");
+                    }
                 }
             }
         }
@@ -820,8 +893,8 @@ static void aux_task(void *arg)
         // recogniser could never fire a `hold` binding on these two controls — the tap had
         // no measurable length. docs/PROTOCOL.md's `parse_device_line` accepts both
         // spellings, so this costs nothing and makes hold work.
-        uint8_t tv = (uint8_t)gpio_get_level(LM_PIN_TOUCH);
-        if (tv != touch_state) {
+        uint8_t tv = have_touch ? (uint8_t)gpio_get_level(LM_PIN_TOUCH) : touch_state;
+        if (have_touch && tv != touch_state) {
             touch_state = tv;
             const bool touched = LM_TOUCH_ACTIVE_HIGH ? (tv != 0) : (tv == 0);
             // Debounce the press edge only; the release must always be reported, or a
@@ -834,8 +907,8 @@ static void aux_task(void *arg)
             }
         }
 
-        uint8_t rv = (uint8_t)gpio_get_level(LM_PIN_REAR);
-        if (rv != rear_state) {
+        uint8_t rv = have_rear ? (uint8_t)gpio_get_level(LM_PIN_REAR) : rear_state;
+        if (have_rear && rv != rear_state) {
             rear_state = rv;
             const bool pressed = (rv == 0);          // active low
             if (!pressed) {
@@ -852,28 +925,41 @@ static void aux_task(void *arg)
 
 static void aux_inputs_start(void)
 {
-    // GPIO 2 needs its RTC hold released before it can be read. Stock's rear-button
-    // rescue path (armed by the sys.bootloader RPC — so it may well be armed right now
-    // if the device was just flashed) does rtc_gpio_hold_en(2) plus a ULP-RISCV watcher
-    // that forces SW_SYS_RST on a rear press. Same bug class as the LED rail: without
-    // this, reads are meaningless. Halting the ULP is deliberately NOT attempted here;
-    // see the note in firmware/README.md before enabling this block.
-    rtc_gpio_hold_dis(LM_PIN_REAR);
-    rtc_gpio_deinit(LM_PIN_REAR);
+    if (LM_ENABLE_REAR) {
+        // GPIO 2 carries two hazards, both from stock's rear-button rescue path.
+        //
+        // 1. It can arrive under an RTC hold (rtc_gpio_hold_en), which makes reads
+        //    meaningless — the same failure class that kept the LED rail dark.
+        // 2. Stock arms a ULP-RISCV watcher that forces SW_SYS_RST when this pin goes
+        //    low. It is armed by the sys.bootloader RPC, which our own flashing script
+        //    calls, so it may be running right now. With it live, pressing the rear
+        //    button reboots the pad.
+        //
+        // Hazard 1 is handled here. Hazard 2 is NOT: halting the ULP needs the `ulp`
+        // component, which ESP-IDF only exposes when CONFIG_ULP_COPROC_ENABLED is set,
+        // and enabling that purely to stop a coprocessor we never use is a poor trade.
+        // Since REAR is opt-in, whoever enables it owns that problem: either clear
+        // RTC_CNTL_ULP_CP_SLP_TIMER_EN, or power-cycle the pad without going through
+        // sys.bootloader first, since that RPC is what arms the watcher.
+        rtc_gpio_hold_dis(LM_PIN_REAR);
+        rtc_gpio_deinit(LM_PIN_REAR);
+    }
 
     // Stock disables BOTH internal pulls on all of these — the board has external
     // pulls, and fighting them with an internal pull-up skews the thresholds.
-    aux_cfg_input(LM_PIN_TOUCH,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
-    aux_cfg_input(LM_PIN_REAR,   GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
-    aux_cfg_input(LM_PIN_ENC_A,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
-    aux_cfg_input(LM_PIN_ENC_B,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
-    aux_cfg_input(LM_PIN_ENC_SW, GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    if (LM_ENABLE_TOUCH)  aux_cfg_input(LM_PIN_TOUCH,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    if (LM_ENABLE_REAR)   aux_cfg_input(LM_PIN_REAR,   GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    if (LM_ENABLE_ENCODER) {
+        aux_cfg_input(LM_PIN_ENC_A,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+        aux_cfg_input(LM_PIN_ENC_B,  GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
+    }
+    if (LM_ENABLE_ENCODER) aux_cfg_input(LM_PIN_ENC_SW, GPIO_PULLDOWN_DISABLE, GPIO_PULLUP_DISABLE);
     xTaskCreatePinnedToCore(aux_task, "lm_aux", 3072, NULL, 4, NULL, 1);
     ESP_LOGW(TAG, "UNVERIFIED inputs enabled: touch=%d rear=%d encA=%d encB=%d encSW=%d",
              LM_PIN_TOUCH, LM_PIN_REAR, LM_PIN_ENC_A, LM_PIN_ENC_B, LM_PIN_ENC_SW);
 }
 
-#else  /* !LM_ENABLE_UNVERIFIED_INPUTS */
+#else  /* !LM_ENABLE_AUX */
 
 // Default build: these pins are never configured and never read.
 static void aux_inputs_start(void)
@@ -882,7 +968,7 @@ static void aux_inputs_start(void)
                   "- set LM_ENABLE_UNVERIFIED_INPUTS=1 once pins are confirmed");
 }
 
-#endif /* LM_ENABLE_UNVERIFIED_INPUTS */
+#endif /* LM_ENABLE_AUX */
 
 // ---- battery: MAX77972 fuel gauge, read-only --------------------------------
 //
@@ -1243,13 +1329,13 @@ static void handle_line(char *line)
         // back to per-pixel `k`/`u` when this is absent or reports frames=0.
         // batt=none|unknown|ok distinguishes "no battery support in this build"
         // from "support present, gauge not answering" from "reading is live".
-        out_line("ok ver 2 keys=%d under=%d frames=1 events=key%s%s batt=%s\n",
+        out_line("ok ver 2 keys=%d under=%d frames=1 events=key%s%s%s%s batt=%s\n",
                  KEY_N, AMB_N,
-#if LM_ENABLE_UNVERIFIED_INPUTS
-                 ",enc,touch,rear",
-#else
-                 "",
-#endif
+                 (LM_ENABLE_ENCODER ? ",enc" : "")
+                 // Concatenating at compile time keeps this honest: the string lists
+                 // exactly what the built firmware emits, not what it could emit.
+                 , (LM_ENABLE_TOUCH ? ",touch" : ""),
+                 (LM_ENABLE_REAR ? ",rear" : ""),
 #if LM_ENABLE_BATTERY
                  ",batt",
 #else
