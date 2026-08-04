@@ -1,4 +1,4 @@
-/* LibreMicro Lighting Studio — Phase 1 web UI.
+/* LibreMicro Studio — web UI (Phase 1 lighting + Phase 5 bindings, profiles, modes).
  *
  * Vanilla ES module. No build step, no dependencies, no network requests other than the
  * daemon's own /api/* endpoints (the daemon may be run offline). Everything here degrades to
@@ -54,6 +54,110 @@ const TARGETS = ['keys', 'underglow', 'all'];
 const BLENDS = ['replace', 'multiply', 'screen', 'overlay'];
 
 const EFFECT_DEFAULTS = { speed: 0.3, intensity: 0.5, direction: 'horizontal', reverse: false, target: 'all', blend: 'replace' };
+
+/* ------------------------------------------------------------------ bindings */
+
+/* Trigger kinds per control, exactly as the schema has them: `triggers` for anything that
+ * presses (keys, the touch pad, the rear button) and `encoder` for the dial. The encoder has no
+ * hold/double because a detent has no duration — see events.py's Recognizer.rotate. */
+const KEY_TRIGGERS = ['press', 'release', 'hold', 'double'];
+const ENC_TRIGGERS = ['cw', 'ccw', 'press'];
+
+const TRIGGER_LABEL = {
+  press: 'Press', release: 'Release', hold: 'Hold', double: 'Double tap',
+  cw: 'Turn clockwise', ccw: 'Turn anticlockwise',
+};
+
+/* device.hold_ms / double_ms defaults — events.py DEFAULT_HOLD_MS / DEFAULT_DOUBLE_MS. */
+const DEFAULT_HOLD_MS = 450;
+const DEFAULT_DOUBLE_MS = 280;
+
+/* The nine action keys of `binding`, which is a oneOf: exactly one may be present. `flash` is
+ * not one of them — it's the optional confirmation colour and rides along with any of them. */
+const BINDING_TYPES = [
+  { key: 'launch', label: 'Launch app', input: 'line', ph: 'Slack', hint: 'Opened with <code>open -a</code>. The application name, not a path.' },
+  { key: 'shortcut', label: 'Keyboard shortcut', input: 'shortcut', ph: 'cmd+shift+4', hint: 'Synthesised by the native helper. Modifiers: <code>cmd ctrl opt shift fn</code>, then one key, e.g. <code>cmd+shift+4</code> or <code>f13</code>.' },
+  { key: 'text', label: 'Type text', input: 'multiline', ph: 'Thanks!\nBill', hint: 'Typed at the cursor, any Unicode. Newlines arrive as real Return presses.' },
+  { key: 'shell', label: 'Run shell command', input: 'multiline', ph: "open -na 'Google Chrome'", hint: 'Run by the daemon. Trigger context arrives as <code>LM_*</code> environment variables.' },
+  { key: 'script', label: 'Run script file', input: 'line', ph: '~/bin/deploy.sh', hint: 'Path to an executable file. Same <code>LM_*</code> environment as <code>shell</code>.' },
+  { key: 'applescript', label: 'Run AppleScript', input: 'multiline', ph: 'tell application "Finder" to activate', hint: 'Source, run through <code>osascript</code>.' },
+  { key: 'mode', label: 'Activate mode', input: 'mode', ph: 'media', hint: 'Switches to a mode of this profile until it times out or you switch away.' },
+  { key: 'profile', label: 'Switch profile', input: 'profile', ph: 'coding', hint: 'A profile name, or <code>next</code> / <code>prev</code> to cycle.' },
+  { key: 'action', label: 'Built-in action', input: 'action', ph: '', hint: 'Implemented natively by the daemon.' },
+];
+const BINDING_KEYS = BINDING_TYPES.map((t) => t.key);
+const bindingType = (k) => BINDING_TYPES.find((t) => t.key === k) || null;
+
+/* The schema's `action` enum, split by what implements it: the media half goes through the same
+ * native helper as `shortcut` (keys.py MEDIA_ACTIONS — they're NX aux-control events, not
+ * keycodes), the rest is daemon-side and works with no helper built. */
+const MEDIA_ACTIONS = ['vol_up', 'vol_down', 'mute', 'play_pause', 'next_track', 'prev_track', 'bright_up', 'bright_down'];
+const NATIVE_ACTIONS = ['desk_up', 'desk_down', 'stand_sit', 'sleep', 'lock', 'profile_next', 'profile_prev', 'reload_config'];
+const ACTION_ENUM = MEDIA_ACTIONS.concat(NATIVE_ACTIONS);
+
+/* ---------------------------------------------------------- shortcut grammar */
+
+/* Mirrors keys.py: canonical modifier order is Apple's, fn first, and a spec is
+ * `mod+mod+key`. Kept in the same order so a recorded chord normalises to exactly the string
+ * parse_shortcut() would produce. */
+const MODIFIERS = ['fn', 'ctrl', 'opt', 'shift', 'cmd'];
+
+/* KeyboardEvent.code -> keys.py canonical key name. `code` rather than `key` because a chord's
+ * `key` is layout- and modifier-dependent (opt+a is "å", shift+4 is "$") while the helper wants
+ * the physical key. Anything absent here is a key we cannot name, and the recorder says so
+ * instead of guessing. */
+const CODE_TO_KEY = (() => {
+  const m = {};
+  for (const c of 'abcdefghijklmnopqrstuvwxyz') m['Key' + c.toUpperCase()] = c;
+  for (let d = 0; d <= 9; d++) { m['Digit' + d] = String(d); m['Numpad' + d] = 'kp' + d; }
+  for (let f = 1; f <= 20; f++) m['F' + f] = 'f' + f;
+  return Object.assign(m, {
+    Escape: 'escape', Tab: 'tab', Enter: 'return', Space: 'space',
+    Backspace: 'delete', Delete: 'forwarddelete',
+    Home: 'home', End: 'end', PageUp: 'pageup', PageDown: 'pagedown',
+    ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
+    Help: 'help', Insert: 'help', CapsLock: 'capslock',
+    Minus: 'minus', Equal: 'equal', BracketLeft: 'leftbracket', BracketRight: 'rightbracket',
+    Backslash: 'backslash', Semicolon: 'semicolon', Quote: 'quote',
+    Comma: 'comma', Period: 'period', Slash: 'slash', Backquote: 'grave',
+    NumpadDecimal: 'kpdecimal', NumpadAdd: 'kpplus', NumpadSubtract: 'kpminus',
+    NumpadMultiply: 'kpmultiply', NumpadDivide: 'kpdivide', NumpadEqual: 'kpequals',
+    NumpadEnter: 'kpenter', NumLock: 'kpclear', Clear: 'kpclear',
+  });
+})();
+
+const MODIFIER_CODES = {
+  MetaLeft: 'cmd', MetaRight: 'cmd', ControlLeft: 'ctrl', ControlRight: 'ctrl',
+  AltLeft: 'opt', AltRight: 'opt', ShiftLeft: 'shift', ShiftRight: 'shift',
+  OSLeft: 'cmd', OSRight: 'cmd', Fn: 'fn', FnLock: 'fn',
+};
+
+/* Chords the browser or macOS takes for itself, so a keydown listener never sees them. There is
+ * no API that reports this, and a page cannot opt out — hence a curated list plus the
+ * lost-focus detection in the recorder, and a text field that is always there as the way out. */
+const RESERVED_CHORDS = [
+  { spec: 'cmd+q', who: 'macOS quits the browser' },
+  { spec: 'cmd+w', who: 'the browser closes the tab' },
+  { spec: 'cmd+shift+w', who: 'the browser closes the window' },
+  { spec: 'cmd+t', who: 'the browser opens a tab' },
+  { spec: 'cmd+shift+t', who: 'the browser reopens a tab' },
+  { spec: 'cmd+n', who: 'the browser opens a window' },
+  { spec: 'cmd+shift+n', who: 'the browser opens a private window' },
+  { spec: 'cmd+m', who: 'macOS minimises the window' },
+  { spec: 'cmd+h', who: 'macOS hides the app' },
+  { spec: 'cmd+opt+h', who: 'macOS hides the others' },
+  { spec: 'cmd+space', who: 'Spotlight' },
+  { spec: 'ctrl+cmd+space', who: 'the emoji picker' },
+  { spec: 'cmd+tab', who: 'the macOS app switcher' },
+  { spec: 'cmd+grave', who: 'the macOS window switcher' },
+  { spec: 'ctrl+cmd+q', who: 'macOS locks the screen' },
+  { spec: 'cmd+opt+escape', who: 'Force Quit' },
+  { spec: 'cmd+shift+3', who: 'the macOS screenshot service' },
+  { spec: 'cmd+shift+4', who: 'the macOS screenshot service' },
+  { spec: 'cmd+shift+5', who: 'the macOS screenshot service' },
+  { spec: 'cmd+ctrl+f', who: 'macOS full-screen' },
+];
+const reservedChord = (spec) => RESERVED_CHORDS.find((r) => r.spec === spec) || null;
 
 /* Strip index -> physical position, CONFIRMED on hardware (layout.py DEFAULT_KEY_POSITIONS /
  * DEFAULT_UNDERGLOW_POSITIONS). Both chains are wired as one serpentine starting at the
@@ -358,8 +462,10 @@ async function req(method, path, body) {
     if (text) { try { data = JSON.parse(text); } catch { data = null; } }
     // A 404 means something is serving this port but it isn't the daemon — it implements
     // every /api route, so a missing route is not "the daemon said no". Without this,
-    // any static file server on the port reads as a healthy daemon.
-    const isDaemon = res.status !== 404;
+    // any static file server on the port reads as a healthy daemon. 501 is the same story
+    // from the other side: that is what a plain static server answers a POST with, and the
+    // daemon never does.
+    const isDaemon = res.status !== 404 && res.status !== 501;
     setDaemonReachable(isDaemon);
     if (!res.ok) {
       return { ok: false, reachable: isDaemon, status: res.status, data,
@@ -385,6 +491,13 @@ const api = {
   identify: (target, index) => req('POST', '/api/identify', { target, index }),
   exportCfg: () => req('GET', '/api/export'),
   importCfg: (b) => req('POST', '/api/import', b),
+  // Phase 5. `simulate` injects an input event as though the pad had sent it — the only way to
+  // fire a binding until firmware v2 is flashed, and the way to test one afterwards without
+  // reaching for the pad. `events` is a polled tail of what the daemon has seen.
+  simulate: (body) => req('POST', '/api/simulate', body),
+  getEvents: (since) => req('GET', '/api/events?since=' + (since | 0)),
+  setProfile: (profile) => req('POST', '/api/profile', { profile }),
+  setMode: (mode) => req('POST', '/api/mode', { mode }),
 };
 
 /* =============================================================== 6. state */
@@ -417,11 +530,22 @@ const state = {
   builtins: BUILTIN_PALETTES,
   daemonReachable: null,
   bootDone: false,
-  status: { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false },
+  status: { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false, input_events: null, keys: null },
   loadedFromDaemon: false,
   dirty: false,
   profile: null,                 // profile name being edited
+  scope: null,                   // null = the profile's own layer, else a mode name
   sel: null,                     // {zone:'keys'|'underglow'|'status', index, pos}
+  bind: { control: 'key', index: 0 },  // control the Bindings panel is editing
+  modeSel: null,                 // mode selected in the Profiles panel
+  rec: null,                     // active shortcut recorder, or null
+  events: [],                    // newest last, as /api/events returns them
+  eventSeq: 0,
+  inputSeen: null,               // status/events input_events_seen: has the pad EVER spoken
+  hits: new Map(),               // control key -> {at, source} for the board highlight
+  evPoll: true,
+  evFlash: true,
+  capsDismissed: false,
   palSel: null,                  // palette name selected in the designer
   palStop: 0,
   geom: null,
@@ -436,24 +560,69 @@ const state = {
 };
 
 const currentProfile = () => (state.config?.profiles || {})[state.profile] || null;
-const currentLighting = () => currentProfile()?.lighting || null;
+const profileModes = () => currentProfile()?.modes || {};
+
+/* The layer being edited. `null` is the profile's own `keys` / `encoder` / `lighting`; a mode
+ * name is that mode's overrides. This mirrors dispatch.py's resolution order exactly — mode
+ * first, then profile — so what the editor calls a layer is what the daemon calls one. */
+const currentMode = () => (state.scope ? profileModes()[state.scope] || null : null);
+const scopeLabel = () => (state.scope ? `mode “${state.scope}”` : 'profile default');
+const scopePath = (tail) => `profiles.${state.profile || '?'}`
+  + (state.scope ? `.modes.${state.scope}` : '') + (tail ? '.' + tail : '');
+
+/** The container being edited: a mode object when scoped to one, else the profile. */
+const scopeOwner = () => (state.scope ? currentMode() : currentProfile());
+
+const currentLighting = () => scopeOwner()?.lighting || null;
 const currentEffect = () => currentLighting()?.effect || null;
 const deviceFps = () => clamp(Number(state.config?.device?.fps) || 30, 1, 60);
+const holdMs = () => clamp(Math.round(Number(state.config?.device?.hold_ms ?? DEFAULT_HOLD_MS)), 50, 5000);
+const doubleMs = () => clamp(Math.round(Number(state.config?.device?.double_ms ?? DEFAULT_DOUBLE_MS)), 50, 2000);
 
 function ensureLighting() {
-  const p = currentProfile();
-  if (!p) return null;
-  if (!p.lighting || typeof p.lighting !== 'object') p.lighting = {};
-  return p.lighting;
+  const o = scopeOwner();
+  if (!o) return null;
+  if (!o.lighting || typeof o.lighting !== 'object') o.lighting = {};
+  return o.lighting;
+}
+
+/** What the pad actually renders in this scope: mode lighting shallow-merged over the
+ *  profile's, which is renderer.py's `lighting.update(mode_spec["lighting"])`. */
+function effectiveLighting() {
+  const base = currentProfile()?.lighting || {};
+  const over = state.scope ? currentMode()?.lighting || {} : {};
+  return { ...base, ...over };
 }
 
 function keyEntry(index, create = false) {
-  const p = currentProfile();
-  if (!p) return null;
-  if (!Array.isArray(p.keys)) { if (!create) return null; p.keys = []; }
-  let k = p.keys.find((x) => x && x.index === index);
-  if (!k && create) { k = { index }; p.keys.push(k); p.keys.sort((a, b) => a.index - b.index); }
+  const o = scopeOwner();
+  if (!o) return null;
+  if (!Array.isArray(o.keys)) { if (!create) return null; o.keys = []; }
+  let k = o.keys.find((x) => x && x.index === index);
+  if (!k && create) { k = { index }; o.keys.push(k); o.keys.sort((a, b) => a.index - b.index); }
   return k || null;
+}
+
+/** A key's rendered base colour: the mode's override if it has one, else the profile's —
+ *  renderer.py applies the profile's key list and then the mode's on top. */
+function keyColorOf(index) {
+  const own = keyEntry(index);
+  if (own && isHex6(own.color)) return own.color;
+  if (!state.scope) return null;
+  const p = currentProfile();
+  const base = (Array.isArray(p?.keys) ? p.keys : []).find((x) => x && x.index === index);
+  return base && isHex6(base.color) ? base.color : null;
+}
+
+/** Drop a key entry that has nothing left but its index — an inert `{index: n}` is legal but
+ *  noise, and the colour editor already prunes them the same way. */
+function pruneKeyEntry(index) {
+  const o = scopeOwner();
+  const k = o && Array.isArray(o.keys) ? o.keys.find((x) => x && x.index === index) : null;
+  if (!k) return;
+  if (k.on && !Object.keys(k.on).length) delete k.on;
+  if (Object.keys(k).length === 1) o.keys = o.keys.filter((x) => x !== k);
+  if (Array.isArray(o.keys) && !o.keys.length) delete o.keys;
 }
 
 /* ============================================================ 7. geometry */
@@ -747,13 +916,15 @@ function effectColor(eff, cp, led, t, zoneSeed) {
 /** Composite base layer + effect layer into per-strip-index colours. */
 function computeFrame(t) {
   const geom = state.geom || buildGeometry();
-  const light = currentLighting() || {};
+  // What the pad would actually show in the scope being edited: a mode's lighting overrides the
+  // profile's key by key, and its key colours layer over the profile's.
+  const light = effectiveLighting();
   const eff = light.effect && light.effect.name ? light.effect : null;
   const cp = eff ? (compiledPalette(eff.palette) || compiledPalette('rainbow')) : null;
 
   const baseKeys = geom.keys.map((k) => {
-    const e = keyEntry(k.index);
-    return e && isHex6(e.color) ? hexToRgb(e.color) : [0, 0, 0];
+    const c = keyColorOf(k.index);
+    return c ? hexToRgb(c) : [0, 0, 0];
   });
   const ugBase = isHex6(light.underglow) ? hexToRgb(light.underglow) : [0, 0, 0];
   let keys = baseKeys, ug = geom.ug.map(() => ugBase);
@@ -778,11 +949,17 @@ const frameToWire = (f) => ({
 
 /* ========================================================== 9. device SVG */
 
-const svgRefs = { keys: new Map(), ug: new Map(), status: [], glow: new Map() };
+const svgRefs = { keys: new Map(), ug: new Map(), status: [], glow: new Map(), feat: new Map() };
 
 /** Ghost glyph for a non-key control. Never focusable, never addressable, never selectable. */
 function featureGlyph(f) {
-  const g = svgEl('g', { class: `feat feat-${f.kind}`, 'aria-hidden': 'true' });
+  // The encoder and the touch pad carry no LED but do carry bindings, so they take a pointer
+  // click through to the Bindings panel. Still aria-hidden and still not focusable: the panel's
+  // own chips are the keyboard path, and the tab order through the board stays LEDs-only.
+  const g = svgEl('g', {
+    class: `feat feat-${f.kind}`, 'aria-hidden': 'true',
+    'data-bindable': f.kind === 'joystick' ? '0' : '1',
+  });
   const cy = f.cy - 6, r = Math.min(f.w, f.h) / 2 - 5;
   if (f.kind === 'encoder') {
     g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r }));
@@ -819,7 +996,8 @@ function buildDevice() {
   state.geomSig = sig;
 
   svg.textContent = '';
-  svgRefs.keys.clear(); svgRefs.ug.clear(); svgRefs.glow.clear(); svgRefs.status = [];
+  svgRefs.keys.clear(); svgRefs.ug.clear(); svgRefs.glow.clear(); svgRefs.feat.clear();
+  svgRefs.status = [];
 
   svg.append(svgEl('rect', { class: 'board', x: GEO.board.x, y: GEO.board.y, width: GEO.board.w, height: GEO.board.h, rx: GEO.board.r }));
 
@@ -855,8 +1033,14 @@ function buildDevice() {
     width: geom.noCentre.w, height: geom.noCentre.h, rx: GEO.ug.r,
   }));
 
-  // The three non-key controls, so the board is recognisable as the real pad.
-  for (const f of geom.featureCells) svg.append(featureGlyph(f));
+  // The three non-key controls, so the board is recognisable as the real pad. They carry no LED,
+  // but the encoder and the touch pad DO carry bindings, so they are kept addressable here for
+  // the event highlight and for a pointer shortcut into the Bindings panel.
+  for (const f of geom.featureCells) {
+    const g = featureGlyph(f);
+    svg.append(g);
+    svgRefs.feat.set(f.kind, { g, cell: f });
+  }
 
   // Keycaps. One group per LED, but a shared cap is drawn as a single wide rounded cap: the
   // regions carry their own colour and their own selection, and a hairline seam plus the shared
@@ -945,6 +1129,50 @@ function stripAtPos(zone, posKey) {
   return v === undefined ? null : v;
 }
 
+/** A key's label in the scope being edited, falling back to the profile's for a mode. */
+function keyLabelOf(index) {
+  const own = keyEntry(index);
+  if (own && own.label) return own.label;
+  if (!state.scope) return '';
+  const p = currentProfile();
+  const base = (Array.isArray(p?.keys) ? p.keys : []).find((x) => x && x.index === index);
+  return (base && base.label) || '';
+}
+
+/* ------------------------------------------------------------- event highlight */
+
+/* How long a control stays lit on the board after its event arrives. Long enough to catch out of
+ * the corner of an eye while tapping down a row of keys, short enough that two presses of the
+ * same key still read as two. */
+const HIT_MS = 900;
+
+function noteHit(control, index, source) {
+  state.hits.set(`${control}:${index}`, { at: performance.now(), source });
+}
+
+/** Decay state for a control's most recent event: {f: 1..0, source} or null. */
+function hitAge(control, index) {
+  const k = `${control}:${index}`;
+  const h = state.hits.get(k);
+  if (!h) return null;
+  const f = 1 - (performance.now() - h.at) / HIT_MS;
+  if (f <= 0) { state.hits.delete(k); return null; }
+  return { f, source: h.source };
+}
+
+/** Paint the highlight onto an LED shape. Inline style, because the stroke rules in style.css
+ *  are CSS declarations and would win over a presentation attribute. */
+function applyHit(shape, age) {
+  if (!age || !state.evFlash) {
+    if (shape.style.stroke) { shape.style.stroke = ''; shape.style.strokeWidth = ''; shape.style.strokeDasharray = ''; }
+    return;
+  }
+  shape.style.stroke = age.source === 'device' ? 'var(--ok)' : 'var(--accent)';
+  shape.style.strokeWidth = String(1.6 + 2.4 * age.f);
+  // Injected events are drawn dashed. A simulated press must never look like a real one.
+  shape.style.strokeDasharray = age.source === 'device' ? '' : '5 3';
+}
+
 function paint(frame) {
   const showIdx = $('chk-indices').checked;
   const showLab = $('chk-labels').checked;
@@ -962,21 +1190,32 @@ function paint(frame) {
     svgRefs.glow.get('key:' + id).setAttribute('fill', hex);
     ref.idx.textContent = showIdx || sweeping === 'keys' ? (shown === null ? '—' : String(shown)) : '';
     ref.idx.setAttribute('fill', inkFor(rgb));
+    const label = i === null ? '' : keyLabelOf(i);
     const entry = i === null ? null : keyEntry(i);
-    ref.lab.textContent = showLab && entry && entry.label ? entry.label.slice(0, 12) : '';
+    ref.lab.textContent = showLab && label ? label.slice(0, 12) : '';
     ref.lab.setAttribute('fill', inkFor(rgb));
     // keep the pair optically centred whether or not a label is showing
     ref.idx.setAttribute('y', ref.lab.textContent ? ref.cell.cy - 1 : ref.cell.cy + 4);
     ref.g.dataset.unmapped = strip === null ? '1' : '0';
     ref.g.dataset.sel = sel && sel.zone === 'keys' && sel.index === i ? '1' : '0';
+    ref.g.dataset.bindsel = state.bind.control === 'key' && state.bind.index === i ? '1' : '0';
+    applyHit(ref.rect, i === null ? null : hitAge('key', i));
     const mates = capMateIndices(id);
     ref.g.setAttribute('aria-label',
       `key at row ${ref.cell.row + 1}, grid column ${ref.cell.gcol + 1}` +
       (i === null ? ', no LED index' : `, index ${i}`) +
       (strip === null ? ', no strip index mapped' : `, strip index ${strip}`) +
-      (entry && entry.label ? `, ${entry.label}` : '') +
+      (label ? `, ${label}` : '') +
       (mates.length ? `, one wide keycap shared with index ${mates.join(' and ')}` : '') +
       `, colour ${rgbToHex(rgb)}`);
+  }
+
+  // Encoder / touch-pad ghosts light up for their events too, so a rotate or a tap is as
+  // visible on the board as a key press.
+  for (const [kind, ref] of svgRefs.feat) {
+    const age = hitAge(kind === 'joystick' ? 'joystick' : kind, 0);
+    ref.g.dataset.hit = age ? age.source : '';
+    ref.g.style.opacity = age ? String(0.5 + 0.5 * age.f) : '';
   }
 
   for (const [id, ref] of svgRefs.ug) {
@@ -1252,13 +1491,26 @@ function sharedCapNote(index) {
   return `One keycap, two switches: this LED and index ${list} sit under the single wide cap `
     + 'in the bottom row. Colouring them separately is the point — a two-pixel gradient across one '
     + 'cap. Binding them to different actions is not reliable, because nobody can choose which half '
-    + 'of the cap they press: treat the pair as one control (Phase 5 owns bindings).';
+    + 'of the cap they press: give the pair the same binding and treat it as one control.';
+}
+
+/** The same warning, phrased for the Bindings panel where it actually bites. */
+function sharedCapBindNote(index) {
+  const k = state.geom?.keys?.[index];
+  if (!k || !k.pos) return '';
+  const mates = capMateIndices(k.pos.join(','));
+  if (!mates.length) return '';
+  return `One physical keycap covers this switch and index ${mates.join(' and ')}. Whichever half `
+    + 'of the wide cap a finger lands on is chance, so binding the two to different actions makes '
+    + 'the cap do a different thing each press. Bind both the same — “Copy to index '
+    + `${mates.join('/')}” below does that — or leave the other half unbound.`;
 }
 
 function renderColorPanel() {
   const sel = state.sel;
   const nameEl = $('sel-name'), hintEl = $('sel-hint'), shEl = $('sel-shared');
   const keyBox = $('key-extra'), stBox = $('status-led-box');
+  $('light-scope').textContent = scopePath('lighting');
   shEl.hidden = true;
   shEl.textContent = '';
 
@@ -1273,12 +1525,16 @@ function renderColorPanel() {
   if (sel.zone === 'keys') {
     const entry = keyEntry(sel.index);
     const strip = state.geom?.keys?.[sel.index]?.strip;
+    const label = keyLabelOf(sel.index);
     nameEl.textContent = `key · index ${sel.index}`;
-    hintEl.textContent = (entry && entry.label ? `“${entry.label}” — ` : '')
-      + `writes profiles.${state.profile}.keys[index ${sel.index}].color`
+    const inherited = state.scope && !isHex6(entry?.color) && keyColorOf(sel.index);
+    hintEl.textContent = (label ? `“${label}” — ` : '')
+      + `writes ${scopePath(`keys[index ${sel.index}].color`)}`
+      + (state.scope ? ' — an override that applies only while that mode is active' : '')
+      + (inherited ? `, currently inherited from the profile (#${inherited}); changing it here creates the override` : '')
       + (strip === null || strip === undefined ? '' : ` · lit by per-key strip index ${strip}`);
     ceLed.setEnabled(true);
-    ceLed.show(entry && isHex6(entry.color) ? entry.color : '000000');
+    ceLed.show(isHex6(entry?.color) ? entry.color : (inherited || '000000'));
     keyBox.hidden = false; stBox.hidden = true;
     const note = sharedCapNote(sel.index);
     if (note) { shEl.textContent = note; shEl.hidden = false; }
@@ -1288,7 +1544,7 @@ function renderColorPanel() {
     hintEl.textContent = 'The config stores one shared underglow base colour — edit it under “Base layer” below. Per-LED underglow colour comes from an effect.'
       + (strip === null || strip === undefined ? '' : ` This position is lit by underglow strip index ${strip}.`);
     ceLed.setEnabled(false);
-    ceLed.show(isHex6(currentLighting()?.underglow) ? currentLighting().underglow : '000000');
+    ceLed.show(isHex6(effectiveLighting().underglow) ? effectiveLighting().underglow : '000000');
     keyBox.hidden = true; stBox.hidden = true;
   } else {
     nameEl.textContent = `status LED ${sel.index}`;
@@ -1321,7 +1577,7 @@ function renderStatusSliders() {
 }
 
 function syncStatusSliders() {
-  const duty = currentLighting()?.status_leds || [];
+  const duty = effectiveLighting().status_leds || [];
   $('status-sliders').querySelectorAll('input[type=range]').forEach((rng, i) => {
     rng.value = String(clamp(Math.round(Number(duty[i]) || 0), 0, 255));
     const out = rng.previousElementSibling?.querySelector('output');
@@ -1484,7 +1740,7 @@ function fillSelect(selectEl, values, labels) {
 
 function renderEffectPanel() {
   const eff = currentEffect();
-  $('eff-scope').textContent = `profiles.${state.profile || '?'}.lighting.effect`;
+  $('eff-scope').textContent = scopePath('lighting.effect');
   paletteOptions($('eff-palette'), true);
 
   const on = !!eff;
@@ -1504,7 +1760,14 @@ function renderEffectPanel() {
   $('out-intensity').textContent = Number($('eff-intensity').value).toFixed(2);
 
   const notes = [];
-  if (!eff) notes.push('This profile has no effect — only the base colours render. Pick a name to add one.');
+  if (state.scope) {
+    notes.push(`Editing mode “${state.scope}”. A mode's lighting is merged over the profile's key by `
+      + 'key, so what you leave unset here keeps coming from the profile — which is why the board '
+      + 'may show an effect this panel calls absent.');
+  }
+  if (!eff) notes.push(state.scope
+    ? 'This mode sets no effect of its own, so the profile\'s runs while it is active. Pick a name to override it.'
+    : 'This profile has no effect — only the base colours render. Pick a name to add one.');
   else {
     if (e.palette && !allPalettes()[e.palette]) notes.push(`Palette “${e.palette}” is not in this config or the built-in corpus — the preview falls back to rainbow.`);
     if (!e.palette && !['rainbow', 'off'].includes(e.name)) notes.push('No palette set — the preview falls back to rainbow.');
@@ -1654,6 +1917,1134 @@ function writeMapping() {
   }
 }
 
+/* ================================================== 16b. shortcut grammar */
+
+/* A client-side mirror of keys.py's parse_shortcut, for two things the recorder needs and a
+ * round trip to the daemon cannot give: normalising a chord the moment it is pressed, and
+ * telling the user a typed spec is wrong before Save. The tables are the same tables; if they
+ * drift, the daemon is right and this is wrong. */
+
+const KEY_NAMES = new Set([
+  ...'abcdefghijklmnopqrstuvwxyz',
+  ...Array.from({ length: 10 }, (_, i) => String(i)),
+  ...Array.from({ length: 20 }, (_, i) => 'f' + (i + 1)),
+  'escape', 'tab', 'return', 'space', 'delete', 'forwarddelete',
+  'home', 'end', 'pageup', 'pagedown', 'left', 'right', 'down', 'up',
+  'help', 'capslock',
+  'minus', 'equal', 'leftbracket', 'rightbracket', 'backslash',
+  'semicolon', 'quote', 'comma', 'period', 'slash', 'grave',
+  ...Array.from({ length: 10 }, (_, i) => 'kp' + i),
+  'kpdecimal', 'kpplus', 'kpminus', 'kpmultiply', 'kpdivide', 'kpequals', 'kpenter', 'kpclear',
+  'plus',
+]);
+
+const MOD_ALIASES = {
+  cmd: 'cmd', command: 'cmd', '⌘': 'cmd', meta: 'cmd', super: 'cmd', win: 'cmd',
+  ctrl: 'ctrl', control: 'ctrl', ctl: 'ctrl', '⌃': 'ctrl',
+  opt: 'opt', option: 'opt', alt: 'opt', '⌥': 'opt',
+  shift: 'shift', shft: 'shift', '⇧': 'shift',
+  fn: 'fn', function: 'fn',
+};
+
+const KEY_ALIASES = {
+  esc: 'escape', enter: 'return', ret: 'return', cr: 'return',
+  spc: 'space', spacebar: 'space',
+  backspace: 'delete', bksp: 'delete', bs: 'delete',
+  fwddelete: 'forwarddelete', forward_delete: 'forwarddelete', fdel: 'forwarddelete',
+  pgup: 'pageup', page_up: 'pageup', pgdn: 'pagedown', pagedn: 'pagedown', page_down: 'pagedown',
+  uparrow: 'up', arrowup: 'up', downarrow: 'down', arrowdown: 'down',
+  leftarrow: 'left', arrowleft: 'left', rightarrow: 'right', arrowright: 'right',
+  caps: 'capslock', caps_lock: 'capslock',
+  '-': 'minus', dash: 'minus', hyphen: 'minus',
+  '=': 'equal', equals: 'equal',
+  '[': 'leftbracket', lbracket: 'leftbracket', left_bracket: 'leftbracket',
+  ']': 'rightbracket', rbracket: 'rightbracket', right_bracket: 'rightbracket',
+  '\\': 'backslash', ';': 'semicolon', "'": 'quote', apostrophe: 'quote',
+  ',': 'comma', '.': 'period', '/': 'slash',
+  '`': 'grave', backtick: 'grave', backquote: 'grave', tilde: 'grave',
+  num_enter: 'kpenter', clear: 'kpclear', '+': 'plus',
+};
+
+const canonicalKeyName = (raw) => (KEY_NAMES.has(raw) ? raw : (KEY_ALIASES[raw] && KEY_NAMES.has(KEY_ALIASES[raw]) ? KEY_ALIASES[raw] : null));
+
+/** Split a chord on '+', keeping a literal plus addressable — keys.py's `_components` rules. */
+function chordComponents(spec) {
+  if (!spec) throw new Error('empty shortcut');
+  if (spec === '+') return ['+'];
+  if (spec.endsWith('++')) {
+    const mods = spec.slice(0, -1).split('+').filter(Boolean);
+    if (!mods.length) throw new Error(`“${spec}” has no key`);
+    return [...mods, '+'];
+  }
+  if (spec.endsWith('+')) throw new Error(`“${spec}” has no key after the last “+” (for a literal plus write “${spec}+” or “${spec}plus”)`);
+  const parts = spec.split('+');
+  if (parts.some((p) => !p)) throw new Error(`“${spec}” has an empty component (write a literal plus last, as in “cmd++”, or use “plus”)`);
+  return parts;
+}
+
+/** Normalise a spec the way the daemon will. Returns {ok, spec} or {ok:false, error}. */
+function parseSpec(raw) {
+  const text = String(raw || '').trim().toLowerCase();
+  if (!text) return { ok: false, error: 'empty' };
+  let comps;
+  try { comps = chordComponents(text); } catch (e) { return { ok: false, error: e.message }; }
+  const rawKey = comps[comps.length - 1];
+  const mods = new Set();
+  for (const m of comps.slice(0, -1)) {
+    const mod = MOD_ALIASES[m];
+    if (!mod) {
+      return { ok: false, error: canonicalKeyName(m)
+        ? `“${m}” is a key, not a modifier — a shortcut has exactly one key, written last`
+        : `unknown modifier “${m}” (one of: ${MODIFIERS.join(', ')})` };
+    }
+    mods.add(mod);
+  }
+  const key = canonicalKeyName(rawKey);
+  if (!key) {
+    return { ok: false, error: MOD_ALIASES[rawKey]
+      ? `“${rawKey}” is a modifier — a shortcut needs a key too`
+      : `unknown key “${rawKey}”` };
+  }
+  return { ok: true, spec: [...MODIFIERS.filter((m) => mods.has(m)), key].join('+') };
+}
+
+/** A KeyboardEvent as a spec, or why it can't be one. */
+function specFromEvent(ev) {
+  const mods = [];
+  if (ev.ctrlKey) mods.push('ctrl');
+  if (ev.altKey) mods.push('opt');
+  if (ev.shiftKey) mods.push('shift');
+  if (ev.metaKey) mods.push('cmd');
+  const ordered = MODIFIERS.filter((m) => mods.includes(m));
+  if (MODIFIER_CODES[ev.code]) return { pending: true, mods: ordered };
+  // `code` not `key`: with modifiers held, `key` is the layout's shifted/opted legend (opt+a is
+  // "å") while the helper wants the physical key.
+  const key = CODE_TO_KEY[ev.code];
+  if (!key) return { error: `this browser calls that key “${ev.code}”, which has no name in the spec grammar` };
+  return { spec: [...ordered, key].join('+'), mods: ordered, key };
+}
+
+/* ===================================================== 16c. panels: bindings */
+
+const CONTROL_META = {
+  key: { label: 'Key', triggers: KEY_TRIGGERS },
+  encoder: { label: 'Encoder', triggers: ENC_TRIGGERS },
+  touch: { label: 'Touch pad', triggers: KEY_TRIGGERS },
+  rear: { label: 'Rear button', triggers: KEY_TRIGGERS },
+};
+const controlTriggers = (c) => (CONTROL_META[c] || CONTROL_META.key).triggers;
+const controlName = (c, i) => (c === 'key' ? `key ${i}` : (CONTROL_META[c] || {}).label || c);
+
+/** The `triggers` object for a control in the scope being edited, created on demand.
+ *
+ *  Where it lives follows dispatch.py exactly: a key's bindings and the encoder's belong to the
+ *  layer (mode override, else profile), while touch and rear are profile-level only because
+ *  modes don't override them. */
+function triggersFor(control, index, create = false) {
+  if (control === 'key') {
+    const e = keyEntry(index, create);
+    if (!e) return null;
+    if (!e.on || typeof e.on !== 'object') { if (!create) return null; e.on = {}; }
+    return e.on;
+  }
+  const owner = control === 'encoder' ? scopeOwner() : currentProfile();
+  if (!owner) return null;
+  if (!owner[control] || typeof owner[control] !== 'object') { if (!create) return null; owner[control] = {}; }
+  return owner[control];
+}
+
+function bindingAt(control, index, kind) {
+  const t = triggersFor(control, index);
+  return t && t[kind] && typeof t[kind] === 'object' ? t[kind] : null;
+}
+
+const boundKinds = (control, index) => {
+  const t = triggersFor(control, index) || {};
+  return controlTriggers(control).filter((k) => t[k]);
+};
+
+/** Which action key a binding carries. The schema's oneOf means there is at most one. */
+const actionKeyOf = (b) => (b ? BINDING_KEYS.find((k) => b[k] !== undefined) || null : null);
+
+/** Drop empty containers rather than leaving `"on": {}` behind. A mode is the exception: the
+ *  schema *requires* its `encoder`, so an empty one there is the valid way to say "no rotation". */
+function cleanupTriggers(control, index) {
+  if (control === 'key') { pruneKeyEntry(index); return; }
+  const owner = control === 'encoder' ? scopeOwner() : currentProfile();
+  if (!owner || !owner[control]) return;
+  if (Object.keys(owner[control]).length) return;
+  if (control === 'encoder' && state.scope) return;
+  delete owner[control];
+}
+
+function removeBinding(control, index, kind) {
+  const t = triggersFor(control, index);
+  if (!t) return;
+  delete t[kind];
+  cleanupTriggers(control, index);
+}
+
+function defaultBindingValue(type, carried) {
+  const str = typeof carried === 'string' ? carried : '';
+  if (type === 'action') return ACTION_ENUM.includes(str) ? str : 'play_pause';
+  if (type === 'mode') {
+    const names = Object.keys(profileModes());
+    return names.includes(str) ? str : (names[0] || '');
+  }
+  if (type === 'profile') {
+    const names = Object.keys(state.config?.profiles || {});
+    return names.includes(str) || str === 'next' || str === 'prev' ? str : 'next';
+  }
+  return str;
+}
+
+/** Set (or clear) the single action key of a binding, keeping any flash colour. */
+function setBindingType(control, index, kind, type) {
+  if (!type) { removeBinding(control, index, kind); return; }
+  const t = triggersFor(control, index, true);
+  if (!t) return;
+  const prev = t[kind] && typeof t[kind] === 'object' ? t[kind] : {};
+  const prevKey = actionKeyOf(prev);
+  const prevInput = prevKey ? bindingType(prevKey)?.input : null;
+  const nextInput = bindingType(type)?.input;
+  // Carry the text over only between the free-text kinds — shell to script is a rename, shell to
+  // "activate mode" is not.
+  const textish = ['line', 'multiline', 'shortcut'];
+  const carried = prevKey && textish.includes(prevInput) && textish.includes(nextInput) ? prev[prevKey] : '';
+  const next = { [type]: defaultBindingValue(type, carried) };
+  if (isHex6(prev.flash)) next.flash = prev.flash;
+  t[kind] = next;
+}
+
+/* ---------------------------------------------------------------- rendering */
+
+function renderBindingsPanel() {
+  $('bind-scope').textContent = scopePath();
+  renderCapsBox();
+  renderControlPicker();
+
+  const { control, index } = state.bind;
+  const isKey = control === 'key';
+  $('bind-label-field').hidden = !isKey;      // only `key` has a label in the schema
+  $('btn-bind-clear').textContent = `Clear all ${controlName(control, index).toLowerCase()} bindings`;
+  if (isKey && document.activeElement !== $('bind-label')) $('bind-label').value = keyEntry(index)?.label || '';
+
+  const shEl = $('bind-shared');
+  shEl.textContent = '';
+  const note = isKey ? sharedCapBindNote(index) : '';
+  shEl.hidden = !note;
+  if (note) {
+    shEl.append(note + ' ');
+    const mates = capMateIndices(state.geom?.keys?.[index]?.pos?.join(',') || '');
+    const btn = el('button', { type: 'button', class: 'ghost small', text: `Copy to index ${mates.join(' and ')}` });
+    btn.addEventListener('click', () => {
+      const src = triggersFor('key', index);
+      if (!src || !Object.keys(src).length) { toast('Nothing bound on this half to copy', 'warn'); return; }
+      for (const m of mates) {
+        const dst = keyEntry(m, true);
+        dst.on = clone(src);
+      }
+      touch(null);
+      renderBindingsPanel();
+      toast(`Both halves of the wide cap now do the same thing`, 'ok');
+    });
+    shEl.append(btn);
+  }
+
+  renderTriggerCards();
+  renderTimingBox();
+}
+
+/** Chips for every bindable control. Keys come from the geometry, so a config with odd
+ *  `key_rows` still lists exactly the switches the board drew. */
+function renderControlPicker() {
+  const wrap = $('bind-controls');
+  const hadFocus = wrap.contains(document.activeElement);
+  wrap.textContent = '';
+
+  const chip = (control, index, label, sub) => {
+    const n = boundKinds(control, index).length;
+    const b = el('button', {
+      type: 'button', class: 'chip', 'aria-pressed': state.bind.control === control && state.bind.index === index ? 'true' : 'false',
+      'data-control': control, 'data-index': String(index),
+      title: `${label}${sub ? ' — ' + sub : ''} · ${n} binding${n === 1 ? '' : 's'}`,
+    }, [
+      el('span', { class: 'chip-t', text: label }),
+      sub ? el('span', { class: 'chip-s', text: sub }) : null,
+      el('span', { class: 'chip-n', text: n ? String(n) : '', 'aria-hidden': n ? null : 'true' }),
+    ]);
+    b.addEventListener('click', () => selectControl(control, index));
+    return b;
+  };
+
+  const keys = el('div', { class: 'chiprow' });
+  const count = state.geom?.keys?.length || KEY_COUNT;
+  for (let i = 0; i < Math.min(count, KEY_COUNT); i++) keys.append(chip('key', i, String(i), keyLabelOf(i)));
+  wrap.append(keys);
+
+  const others = el('div', { class: 'chiprow' });
+  others.append(chip('encoder', 0, 'Encoder', 'cw / ccw / press'));
+  others.append(chip('touch', 0, 'Touch pad', 'profile-level'));
+  others.append(chip('rear', 0, 'Rear button', 'profile-level'));
+  wrap.append(others);
+
+  if (hadFocus) wrap.querySelector('[aria-pressed="true"]')?.focus();
+}
+
+function selectControl(control, index) {
+  state.bind = { control, index };
+  if (control === 'key') state.sel = { zone: 'keys', index, pos: state.geom?.keys?.[index]?.pos?.join(',') || null };
+  renderBindingsPanel();
+  renderColorPanel();
+  if (state.lastFrame) paint(state.lastFrame);
+}
+
+function renderTriggerCards() {
+  const mount = $('bind-triggers');
+  mount.textContent = '';
+  const { control, index } = state.bind;
+  for (const kind of controlTriggers(control)) mount.append(triggerCard(control, index, kind));
+  // touch / rear live on the profile even while a mode is being edited; say so once, here,
+  // rather than letting someone believe they made a mode-only override.
+  if (state.scope && (control === 'touch' || control === 'rear')) {
+    mount.append(el('p', { class: 'hint', text:
+      `Modes do not override ${controlName(control, 0).toLowerCase()} bindings — the daemon resolves `
+      + `them from the profile only, so these stay profiles.${state.profile}.${control} whatever the `
+      + 'Editing selector says.' }));
+  }
+}
+
+/** Replace one card in place, keeping the rest of the panel (and the caret) alone. */
+function rebuildCard(control, index, kind, focus) {
+  const old = $('bind-triggers').querySelector(`.trig[data-kind="${kind}"]`);
+  const next = triggerCard(control, index, kind);
+  if (old) old.replaceWith(next); else $('bind-triggers').append(next);
+  if (focus) next.querySelector(focus)?.focus();
+  refreshTriggerNotes();
+}
+
+/** Re-run just the interaction warnings across all cards — binding `double` changes what the
+ *  `press` card has to say, and that must not wait for a full re-render. */
+function refreshTriggerNotes() {
+  const { control, index } = state.bind;
+  for (const kind of controlTriggers(control)) {
+    const card = $('bind-triggers').querySelector(`.trig[data-kind="${kind}"]`);
+    if (!card) continue;
+    const slot = card.querySelector('.trig-notes');
+    if (slot) { slot.textContent = ''; for (const n of triggerNotes(control, index, kind)) slot.append(n); }
+  }
+  renderTimingBox();
+  renderControlPicker();
+}
+
+function triggerCard(control, index, kind) {
+  const b = bindingAt(control, index, kind);
+  const type = actionKeyOf(b);
+  const card = el('div', { class: 'trig', 'data-kind': kind, 'data-bound': b ? '1' : '0' });
+
+  const head = el('div', { class: 'trig-head' }, [
+    el('strong', { text: TRIGGER_LABEL[kind] || kind }),
+    el('span', { class: 'pill', text: type ? bindingType(type).label : 'not bound' }),
+    el('span', { class: 'spacer' }),
+  ]);
+  const test = el('button', {
+    type: 'button', class: 'ghost small test', text: '▶ Test',
+    title: b ? `Inject the ${kind} event for ${controlName(control, index)} — a simulated press, not a real one`
+      : 'Nothing is bound to this trigger',
+  });
+  test.disabled = !b;
+  test.addEventListener('click', () => testTrigger(control, index, kind));
+  head.append(test);
+  card.append(head);
+
+  const body = el('div', { class: 'trig-body' });
+
+  const sel = el('select', { class: 'trig-type', 'aria-label': `${TRIGGER_LABEL[kind] || kind} does` });
+  sel.append(el('option', { value: '', text: '(nothing)' }));
+  for (const t of BINDING_TYPES) sel.append(el('option', { value: t.key, text: t.label }));
+  sel.value = type || '';
+  sel.addEventListener('change', () => {
+    setBindingType(control, index, kind, sel.value);
+    touch(null);
+    rebuildCard(control, index, kind, '.trig-type');
+  });
+  body.append(el('label', { class: 'field' }, [el('span', { text: 'Does' }), sel]));
+
+  if (b && type) {
+    body.append(bindingValueEditor(control, index, kind, type, b));
+    body.append(el('p', { class: 'hint tight', html: bindingType(type).hint }));
+    body.append(flashRow(control, index, kind, b));
+  }
+  card.append(body);
+
+  const notes = el('div', { class: 'trig-notes' });
+  for (const n of triggerNotes(control, index, kind)) notes.append(n);
+  card.append(notes);
+  return card;
+}
+
+/** The value control for a binding's single action key. */
+function bindingValueEditor(control, index, kind, type, b) {
+  const meta = bindingType(type);
+  const write = (v) => {
+    const t = triggersFor(control, index, true);
+    if (!t || !t[kind]) return;
+    t[kind][type] = v;
+    touch(null);
+  };
+  const label = (kids) => el('label', { class: 'field' }, [el('span', { text: meta.label }), ...[].concat(kids)]);
+
+  if (meta.input === 'multiline') {
+    const ta = el('textarea', { rows: '2', spellcheck: 'false', placeholder: meta.ph, 'aria-label': meta.label });
+    ta.value = String(b[type] ?? '');
+    ta.addEventListener('input', () => { write(ta.value); markEmpty(ta); });
+    markEmpty(ta);
+    return label(ta);
+  }
+  if (meta.input === 'shortcut') return shortcutEditor(control, index, kind, b, write);
+  if (meta.input === 'action') {
+    const s = el('select', { 'aria-label': 'Built-in action' });
+    const g1 = el('optgroup', { label: 'Media / volume / brightness — needs the helper' });
+    for (const a of MEDIA_ACTIONS) g1.append(el('option', { value: a, text: a }));
+    const g2 = el('optgroup', { label: 'Daemon-side — works with no helper' });
+    for (const a of NATIVE_ACTIONS) g2.append(el('option', { value: a, text: a }));
+    s.append(g1, g2);
+    if (!ACTION_ENUM.includes(b[type])) s.append(el('option', { value: b[type], text: `${b[type] || '(empty)'} — not in the schema enum` }));
+    s.value = b[type] ?? '';
+    s.addEventListener('change', () => write(s.value));
+    return label(s);
+  }
+  if (meta.input === 'mode' || meta.input === 'profile') {
+    const names = meta.input === 'mode' ? Object.keys(profileModes()) : Object.keys(state.config?.profiles || {});
+    const s = el('select', { 'aria-label': meta.label });
+    if (meta.input === 'profile') {
+      const g = el('optgroup', { label: 'Cycle' });
+      g.append(el('option', { value: 'next', text: 'next' }), el('option', { value: 'prev', text: 'prev' }));
+      s.append(g);
+    }
+    const g = el('optgroup', { label: meta.input === 'mode' ? 'Modes in this profile' : 'Profiles' });
+    for (const n of names) g.append(el('option', { value: n, text: n }));
+    if (!names.length) g.append(el('option', { value: '', text: meta.input === 'mode' ? '(this profile has no modes)' : '(none)' }));
+    s.append(g);
+    const known = names.includes(b[type]) || (meta.input === 'profile' && ['next', 'prev'].includes(b[type]));
+    if (!known) s.append(el('option', { value: b[type] ?? '', text: `${b[type] || '(empty)'} — does not exist` }));
+    s.value = b[type] ?? '';
+    s.addEventListener('change', () => write(s.value));
+    const wrap = label(s);
+    if (!known) wrap.append(el('p', { class: 'hint tight warn', text: `There is no ${meta.input} named “${b[type]}” in this config — the daemon will refuse the trigger at runtime.` }));
+    return wrap;
+  }
+  const inp = el('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: meta.ph, 'aria-label': meta.label });
+  inp.value = String(b[type] ?? '');
+  inp.addEventListener('input', () => { write(inp.value); markEmpty(inp); });
+  markEmpty(inp);
+  return label(inp);
+}
+
+/** An action key with an empty value is legal JSON and a useless binding; flag it in place. */
+function markEmpty(node) { node.dataset.empty = node.value.trim() ? '0' : '1'; }
+
+/* ------------------------------------------------------------ the recorder */
+
+function shortcutEditor(control, index, kind, b, write) {
+  const wrap = el('div', { class: 'field rec' });
+  const inp = el('input', { type: 'text', class: 'rec-in', spellcheck: 'false', autocomplete: 'off', placeholder: 'cmd+shift+4', 'aria-label': 'Shortcut spec' });
+  inp.value = String(b.shortcut ?? '');
+  const btn = el('button', { type: 'button', class: 'ghost small', text: '● Record' });
+  const status = el('p', { class: 'rec-status' });
+
+  const describe = () => {
+    const raw = inp.value.trim();
+    if (!raw) { status.dataset.kind = 'warn'; status.textContent = 'No chord yet — press Record, or type one.'; return; }
+    const p = parseSpec(raw);
+    if (!p.ok) { status.dataset.kind = 'err'; status.textContent = 'Not a chord the daemon will accept: ' + p.error; return; }
+    const res = reservedChord(p.spec);
+    status.dataset.kind = res ? 'warn' : 'ok';
+    status.textContent = (p.spec === raw.toLowerCase() ? `Normalised: ${p.spec}` : `“${raw}” normalises to ${p.spec}`)
+      + (res ? ` — taken before a browser can see it (${res.who}), so this one has to be typed. Bound here it still works: the pad sends it and macOS acts on it.` : '');
+  };
+
+  inp.addEventListener('input', () => {
+    write(inp.value);
+    markEmpty(inp);
+    describe();
+  });
+  inp.addEventListener('change', () => {
+    const p = parseSpec(inp.value);
+    if (p.ok) { inp.value = p.spec; write(p.spec); }   // store what the daemon stores
+    describe();
+  });
+  markEmpty(inp);
+  describe();
+
+  btn.addEventListener('click', () => {
+    if (state.rec) { stopRecording(); return; }
+    startRecording({ btn, inp, status, commit: (spec) => { inp.value = spec; write(spec); markEmpty(inp); describe(); } });
+  });
+
+  wrap.append(el('span', {}, [el('span', { text: 'Keyboard shortcut' })]));
+  wrap.append(el('div', { class: 'rec-row' }, [inp, btn]));
+  wrap.append(status);
+  wrap.append(el('details', { class: 'rec-help' }, [
+    el('summary', { text: 'Chords a browser cannot capture' }),
+    el('p', { class: 'hint tight', text:
+      'macOS and the browser claim some chords before any page sees the keydown, and a page cannot '
+      + 'opt out. Type those into the field instead — they still work as bindings, because the pad, '
+      + 'not the browser, is what sends them. The fn modifier is invisible to browsers altogether, '
+      + 'so fn chords always have to be typed.' }),
+    el('ul', { class: 'rec-list' }, RESERVED_CHORDS.map((r) => el('li', {}, [
+      el('code', { text: r.spec }), el('span', { class: 'hint tight', text: ' — ' + r.who }),
+    ]))),
+  ]));
+  return wrap;
+}
+
+function startRecording(ui) {
+  stopRecording();
+  state.rec = ui;
+  ui.btn.textContent = '■ Stop';
+  ui.btn.classList.add('primary');
+  ui.status.dataset.kind = 'rec';
+  ui.status.textContent = 'Listening — press the chord now. Escape cancels.';
+  window.addEventListener('keydown', onRecordKey, true);
+  window.addEventListener('blur', onRecordBlur);
+}
+
+function stopRecording() {
+  const ui = state.rec;
+  state.rec = null;
+  window.removeEventListener('keydown', onRecordKey, true);
+  window.removeEventListener('blur', onRecordBlur);
+  if (!ui) return;
+  ui.btn.textContent = '● Record';
+  ui.btn.classList.remove('primary');
+}
+
+function onRecordKey(ev) {
+  const ui = state.rec;
+  if (!ui) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  // Escape alone gets out — a recorder you cannot leave with the key everyone reaches for is a
+  // trap. Escape as a *binding* is typed, which the status line says.
+  if (ev.code === 'Escape' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+    ui.status.dataset.kind = 'warn';
+    ui.status.textContent = 'Cancelled. To bind Escape itself, type “escape” in the field.';
+    stopRecording();
+    return;
+  }
+
+  const r = specFromEvent(ev);
+  if (r.pending) {
+    ui.status.dataset.kind = 'rec';
+    ui.status.textContent = `Listening — ${r.mods.join('+')}+…`;
+    return;
+  }
+  if (r.error) {
+    ui.status.dataset.kind = 'err';
+    ui.status.textContent = r.error + ' — type the name if you know it, or pick another key.';
+    return;
+  }
+  stopRecording();
+  const p = parseSpec(r.spec);
+  ui.commit(p.ok ? p.spec : r.spec);
+  toast(`Recorded ${p.ok ? p.spec : r.spec}`, 'ok', 2200);
+}
+
+function onRecordBlur() {
+  const ui = state.rec;
+  if (!ui) return;
+  stopRecording();
+  ui.status.dataset.kind = 'warn';
+  ui.status.textContent = 'Something else took that chord before this page saw it — macOS or the '
+    + 'browser owns it. Type it into the field instead; it still works as a binding.';
+}
+
+/* --------------------------------------------------------------- flash colour */
+
+function flashRow(control, index, kind, b) {
+  const on = el('input', { type: 'checkbox', 'aria-label': 'Flash the key as confirmation' });
+  const col = el('input', { type: 'color', 'aria-label': 'Flash colour' });
+  const hex = el('input', { type: 'text', class: 'ce-hex', spellcheck: 'false', maxlength: '7', 'aria-label': 'Flash colour hex' });
+  const has = isHex6(b.flash);
+  on.checked = has;
+  const value = has ? b.flash.toLowerCase() : 'ffffff';
+  col.value = '#' + value;
+  hex.value = value;
+  col.disabled = hex.disabled = !has;
+
+  const write = (v) => {
+    const t = triggersFor(control, index, true);
+    if (!t || !t[kind]) return;
+    if (v === null) delete t[kind].flash; else t[kind].flash = v;
+    touch(null);
+  };
+  on.addEventListener('change', () => {
+    col.disabled = hex.disabled = !on.checked;
+    write(on.checked ? hex.value.replace('#', '').toLowerCase() : null);
+  });
+  col.addEventListener('input', () => { hex.value = col.value.replace('#', ''); write(hex.value); });
+  hex.addEventListener('input', () => {
+    const v = hex.value.replace('#', '').trim().toLowerCase();
+    if (isHex6(v)) { col.value = '#' + v; write(v); }
+  });
+
+  return el('label', { class: 'field' }, [
+    el('span', { text: 'Flash on fire (optional)' }),
+    el('span', { class: 'swatchrow' }, [on, col, hex,
+      el('span', { class: 'hint tight', text: control === 'key' ? 'Briefly lights this key.' : 'Briefly lights the pad.' })]),
+  ]);
+}
+
+/* -------------------------------------------------- the interaction warnings */
+
+/* The one genuinely surprising thing about trigger kinds, said where it is chosen rather than in
+ * a help page: binding `double` costs `press` its immediacy, and a hold that fires eats the
+ * press. Both come straight from events.py's Recognizer. */
+function triggerNotes(control, index, kind) {
+  const out = [];
+  const bound = new Set(boundKinds(control, index));
+  const note = (text, cls) => out.push(el('p', { class: 'trig-note' + (cls ? ' ' + cls : ''), text }));
+
+  if (control === 'encoder') {
+    if (kind === 'cw' || kind === 'ccw') {
+      note('Fires once per detent, immediately — a dial that lags is unusable. Rotation has no hold or double.');
+    } else {
+      note('The encoder button. Its press fires when the button is released, and the schema gives the encoder only cw / ccw / press — no release, hold or double.');
+    }
+    return out;
+  }
+
+  const tapOnly = control === 'touch' || control === 'rear';
+  if (kind === 'press') {
+    if (bound.has('double')) {
+      note(`Because “double tap” is bound here, press cannot fire until the ${doubleMs()} ms `
+        + 'double-tap window has closed — the daemon does not yet know whether a second tap is '
+        + 'coming. This control will not feel instant. Unbind double to get press back immediately.', 'warn');
+    } else {
+      note('Fires the moment the control is released, with no delay — nothing is bound to double, so there is no window to wait out.');
+    }
+    if (bound.has('hold')) {
+      note(`A press held past ${holdMs()} ms fires “hold” instead and press is suppressed, so one long press does one thing.`);
+    }
+  } else if (kind === 'release') {
+    note('Independent of the rest: fires on every release, including one that already fired hold or double. Bind it for press-and-hold behaviour (walkie-talkie style) together with press.');
+  } else if (kind === 'hold') {
+    note(`Fires ${holdMs()} ms after the control goes down, while it is still held — and suppresses the press that the release would otherwise produce.`);
+    if (tapOnly) {
+      note(`Firmware v2 reports the ${controlName(control, 0).toLowerCase()} as one line with no `
+        + 'down/up pair, and a tap has no duration — so hold can never fire for this control from '
+        + 'real hardware. Test below sends a genuine down … up pair, which does fire it.', 'warn');
+    }
+  } else if (kind === 'double') {
+    note(`Two taps inside ${doubleMs()} ms. Binding this is what costs latency: press on this `
+      + 'control now waits out that window on every single tap. Controls with no double binding '
+      + 'fire press instantly whatever double_ms says.', 'warn');
+    if (bound.has('press')) note('A double tap fires double only — the deferred press is cancelled, so you never get press-then-double.');
+  }
+  return out;
+}
+
+function renderTimingBox() {
+  $('rng-hold').value = String(holdMs());
+  $('out-hold').textContent = holdMs() + ' ms';
+  $('rng-double').value = String(doubleMs());
+  $('out-double').textContent = doubleMs() + ' ms';
+  $('timing-scope').textContent = 'device.hold_ms / device.double_ms';
+
+  // Who is actually paying for double_ms, listed by name — the cost is invisible otherwise.
+  const payers = [];
+  for (const [pname, p] of Object.entries(state.config?.profiles || {})) {
+    const scan = (owner, where) => {
+      for (const k of owner?.keys || []) if (k?.on?.double) payers.push(`${where}key ${k.index}`);
+      for (const c of ['touch', 'rear']) if (owner?.[c]?.double) payers.push(`${where}${c}`);
+    };
+    scan(p, state.config.profiles && Object.keys(state.config.profiles).length > 1 ? `${pname}: ` : '');
+    for (const [mname, m] of Object.entries(p?.modes || {})) scan(m, `${pname}/${mname}: `);
+  }
+  $('timing-note').textContent =
+    `Hold fires after ${holdMs()} ms; a second tap inside ${doubleMs()} ms is a double. These are `
+    + 'global (device.hold_ms / device.double_ms), and double_ms only delays controls that '
+    + (payers.length
+      ? `actually bind double — currently ${payers.join(', ')}.`
+      : 'actually bind double. Nothing in this config binds double, so nothing pays for it.');
+}
+
+/* ------------------------------------------------------------ capability box */
+
+function renderCapsBox() {
+  const box = $('caps-box');
+  const caps = state.status.keys;
+  const note = $('caps-note');
+  if (!caps || typeof caps !== 'object') {
+    box.hidden = state.daemonReachable !== false;
+    box.dataset.level = 'info';
+    note.textContent = 'No daemon, so keyboard-synthesis availability is unknown. shortcut, text and '
+      + 'media action bindings all need the native helper on the machine that runs the daemon.';
+    return;
+  }
+  box.hidden = false;
+  const built = caps.built !== false && caps.helper !== null;
+  const access = caps.accessibility;
+  const bits = [];
+  if (!built) {
+    box.dataset.level = 'err';
+    bits.push(`The ${'lmkey'} helper is not built (looked at ${caps.expected_at || 'host/swift/lmkey'}), so shortcut, text and the media half of action do nothing at all — silently.`);
+    if (caps.hint) bits.push(caps.hint);
+  } else if (access === false) {
+    box.dataset.level = 'err';
+    bits.push('The helper is built but not trusted for Accessibility, so synthesised keys are discarded silently.');
+    bits.push(caps.hint || 'Grant Accessibility in System Settings › Privacy & Security › Accessibility.');
+  } else if (access === null || access === undefined) {
+    box.dataset.level = 'warn';
+    bits.push('The helper is built, but whether it is trusted for Accessibility could not be determined. If shortcuts do nothing, that is the reason.');
+  } else {
+    box.dataset.level = 'ok';
+    bits.push('Helper built and trusted for Accessibility — shortcut, text and media actions will land.');
+  }
+  if (!built || access !== true) {
+    bits.push('macOS attributes that permission to the process that launched the daemon — your Terminal, iTerm or launchd job — not to the helper binary, so grant it there and restart the daemon.');
+  }
+  const users = countSynthBindings();
+  if (users) bits.push(`${users} binding${users === 1 ? '' : 's'} in this config need it.`);
+  // The daemon's hints don't end in a full stop, and two sentences running together read as one.
+  note.textContent = bits.map((b) => (/[.!?]$/.test(b.trim()) ? b.trim() : b.trim() + '.')).join(' ');
+}
+
+/** How many bindings in the whole config depend on the native helper. */
+function countSynthBindings() {
+  let n = 0;
+  const scan = (t) => {
+    for (const b of Object.values(t || {})) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.shortcut !== undefined || b.text !== undefined) n++;
+      else if (typeof b.action === 'string' && MEDIA_ACTIONS.includes(b.action)) n++;
+    }
+  };
+  const scanOwner = (o) => {
+    for (const k of o?.keys || []) scan(k?.on);
+    scan(o?.encoder); scan(o?.touch); scan(o?.rear);
+  };
+  for (const p of Object.values(state.config?.profiles || {})) {
+    scanOwner(p);
+    for (const m of Object.values(p?.modes || {})) scanOwner(m);
+  }
+  return n;
+}
+
+/* ============================================ 16d. testing without hardware */
+
+/* Firmware v2 emits real key events but is not flashed yet, so POST /api/simulate is how a
+ * binding gets fired at all today — and afterwards it stays the way to test one without
+ * reaching for the pad. Everything here goes through the daemon's real recogniser and
+ * dispatcher: the only thing simulated is the event on the wire. */
+
+const HOLD_MARGIN_MS = 160;
+/** The daemon's own hold sleep is capped at 2 s (server.py), so past that we time it here. */
+const SERVER_HOLD_CAP_MS = 1800;
+
+async function inject(body) {
+  const res = await api.simulate(body);
+  if (!res.ok) {
+    toast(res.reachable
+      ? 'The daemon refused the injection: ' + ((res.data && (res.data.errors || []).join('; ')) || res.error)
+      : 'No daemon — nothing to inject into. Start the daemon to test bindings.', 'err', 5500);
+    return null;
+  }
+  return res.data || {};
+}
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function testTrigger(control, index, kind) {
+  const what = controlName(control, index).toLowerCase();
+  const b = bindingAt(control, index, kind);
+  const type = actionKeyOf(b);
+  let ok = null;
+
+  if (control === 'encoder') {
+    if (kind === 'cw' || kind === 'ccw') ok = await inject({ line: `enc ${kind}` });
+    else {
+      ok = await inject({ line: 'enc press' });
+      if (ok) ok = await inject({ line: 'enc release' });
+    }
+  } else if (control === 'key') {
+    if (kind === 'hold') {
+      const ms = holdMs() + HOLD_MARGIN_MS;
+      if (ms <= SERVER_HOLD_CAP_MS) {
+        // Let the daemon hold the key down for real: hold_s makes its recogniser watch the clock
+        // rather than us pretending the trigger fired.
+        ok = await inject({ key: index, hold_s: ms / 1000 });
+      } else {
+        ok = await inject({ line: `key ${index} down` });
+        if (ok) { await wait(ms); ok = await inject({ line: `key ${index} up` }); }
+      }
+    } else if (kind === 'double') {
+      ok = await inject({ key: index });
+      if (ok) ok = await inject({ key: index });    // second tap inside double_ms
+    } else {
+      ok = await inject({ key: index });
+    }
+  } else {
+    // touch / rear: v2 sends one bare line per activation, but the daemon also accepts an
+    // explicit down/up pair, which is the only way to exercise hold.
+    if (kind === 'hold') {
+      ok = await inject({ line: `${control} down` });
+      if (ok) { await wait(holdMs() + HOLD_MARGIN_MS); ok = await inject({ line: `${control} up` }); }
+    } else if (kind === 'double') {
+      ok = await inject({ line: control });
+      if (ok) ok = await inject({ line: control });
+    } else {
+      ok = await inject({ line: control });
+    }
+  }
+
+  if (!ok) return;
+  pollEvents();
+  const also = kind === 'press' && boundKinds(control, index).includes('release')
+    ? ' The bound release fired too — a real press always releases.' : '';
+  const slow = kind === 'press' && boundKinds(control, index).includes('double')
+    ? ` Watch for the ${doubleMs()} ms delay: double is bound here, so press waits out the window.` : '';
+  toast(`Simulated ${kind} on ${what}${type ? ` → ${bindingType(type).label.toLowerCase()}` : ''}.`
+    + ' This was injected, not a real press.' + also + slow, 'ok', 5200);
+}
+
+/* ================================================== 16e. panels: profiles */
+
+function profileNames() { return Object.keys(state.config?.profiles || {}); }
+
+function uniqueName(base, taken) {
+  let n = base, i = 2;
+  while (taken.includes(n)) n = `${base}-${i++}`;
+  return n;
+}
+
+/** Rebuild `profiles` in a new key order. Object key order is what profile_next cycles in, so
+ *  reordering is a real edit and not cosmetic. */
+function reorderProfile(name, delta) {
+  const names = profileNames();
+  const i = names.indexOf(name);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= names.length) return;
+  names.splice(j, 0, ...names.splice(i, 1));
+  const next = {};
+  for (const n of names) next[n] = state.config.profiles[n];
+  state.config.profiles = next;
+  touch(null);
+  renderProfileSelect();
+  renderProfilesPanel();
+}
+
+function renameProfile(from, to) {
+  if (!from || !to || from === to) return false;
+  if (profileNames().includes(to)) { toast(`A profile called “${to}” already exists`, 'warn'); return false; }
+  const names = profileNames();
+  const next = {};
+  for (const n of names) next[n === from ? to : n] = state.config.profiles[n];
+  state.config.profiles = next;
+  if (state.config.active_profile === from) state.config.active_profile = to;
+  // Keep any binding that switched to it pointing at it.
+  for (const p of Object.values(state.config.profiles)) {
+    const fix = (t) => { for (const b of Object.values(t || {})) if (b && b.profile === from) b.profile = to; };
+    for (const k of p?.keys || []) fix(k?.on);
+    fix(p?.encoder); fix(p?.touch); fix(p?.rear);
+    for (const m of Object.values(p?.modes || {})) {
+      for (const k of m?.keys || []) fix(k?.on);
+      fix(m?.encoder);
+    }
+  }
+  if (state.profile === from) state.profile = to;
+  touch(null);
+  return true;
+}
+
+function renderProfilesPanel() {
+  const list = $('prof-list');
+  list.textContent = '';
+  const names = profileNames();
+  const active = state.status.active_profile || state.config?.active_profile;
+
+  names.forEach((n, i) => {
+    const p = state.config.profiles[n];
+    const row = el('div', { class: 'lrow', 'data-sel': n === state.profile ? '1' : '0' });
+    const pick = el('button', { type: 'button', class: 'lrow-main', 'aria-pressed': n === state.profile ? 'true' : 'false' }, [
+      el('span', { class: 'lrow-t', text: p?.label ? `${p.label}` : n }),
+      el('span', { class: 'lrow-s', text: n + (p?.auto_activate_app ? ` · auto for ${p.auto_activate_app}` : '') }),
+    ]);
+    pick.addEventListener('click', () => { setProfileEditing(n); });
+    row.append(pick);
+    if (n === active) row.append(el('span', { class: 'tag ok', text: 'active' }));
+    else if (n === state.config?.active_profile) row.append(el('span', { class: 'tag', text: 'startup' }));
+
+    const up = el('button', { type: 'button', class: 'ghost small', text: '↑', 'aria-label': `Move ${n} earlier` });
+    up.disabled = i === 0;
+    up.addEventListener('click', () => reorderProfile(n, -1));
+    const down = el('button', { type: 'button', class: 'ghost small', text: '↓', 'aria-label': `Move ${n} later` });
+    down.disabled = i === names.length - 1;
+    down.addEventListener('click', () => reorderProfile(n, 1));
+    const now = el('button', { type: 'button', class: 'ghost small', text: 'Switch now', title: 'POST /api/profile — changes the running daemon without saving' });
+    now.addEventListener('click', async () => {
+      const res = await api.setProfile(n);
+      if (res.ok && res.data && res.data.ok !== false) { toast(`Daemon switched to “${res.data.active_profile || n}”`, 'ok'); refreshStatus(); }
+      else toast(res.reachable ? 'Daemon refused the switch: ' + ((res.data && (res.data.errors || []).join('; ')) || res.error) : 'No daemon — nothing to switch', 'warn');
+    });
+    const del = el('button', { type: 'button', class: 'ghost small danger', text: 'Delete', 'aria-label': `Delete profile ${n}` });
+    del.disabled = names.length <= 1;
+    del.addEventListener('click', () => {
+      if (!confirm(`Delete profile “${n}” and everything in it?`)) return;
+      delete state.config.profiles[n];
+      if (state.config.active_profile === n) state.config.active_profile = profileNames()[0];
+      if (state.profile === n) { state.profile = profileNames()[0]; state.scope = null; }
+      touch(null);
+      renderProfileSelect(); renderScopeSelect(); renderProfilesPanel();
+      adoptScopeChange();
+    });
+    row.append(el('div', { class: 'lrow-acts' }, [up, down, now, del]));
+    list.append(row);
+  });
+
+  const p = currentProfile();
+  $('prof-name').textContent = state.profile || '—';
+  if (document.activeElement !== $('prof-key')) $('prof-key').value = state.profile || '';
+  if (document.activeElement !== $('prof-label')) $('prof-label').value = p?.label || '';
+  if (document.activeElement !== $('prof-app')) $('prof-app').value = p?.auto_activate_app || '';
+  for (const id of ['prof-key', 'prof-label', 'prof-app']) $(id).disabled = !p;
+
+  renderModesPanel();
+}
+
+function setProfileEditing(n) {
+  state.profile = n;
+  state.scope = null;
+  state.modeSel = null;
+  renderProfileSelect();
+  renderScopeSelect();
+  adoptScopeChange();
+  renderProfilesPanel();
+}
+
+/* --------------------------------------------------------------------- modes */
+
+function renderModesPanel() {
+  $('mode-owner').textContent = state.profile || '—';
+  const modes = profileModes();
+  const names = Object.keys(modes);
+  if (state.modeSel && !names.includes(state.modeSel)) state.modeSel = null;
+
+  const list = $('mode-list');
+  list.textContent = '';
+  if (!names.length) {
+    list.append(el('p', { class: 'hint', text: 'No modes in this profile. A mode is optional — add one when you want the encoder to mean something different for a while.' }));
+  }
+  for (const n of names) {
+    const m = modes[n];
+    const row = el('div', { class: 'lrow', 'data-sel': n === state.modeSel ? '1' : '0' });
+    const encBits = ENC_TRIGGERS.filter((k) => m?.encoder?.[k]).map((k) => `${k}: ${describeBinding(m.encoder[k])}`);
+    const pick = el('button', { type: 'button', class: 'lrow-main', 'aria-pressed': n === state.modeSel ? 'true' : 'false' }, [
+      el('span', { class: 'lrow-t', text: n }),
+      el('span', { class: 'lrow-s', text: [
+        Number.isInteger(m?.activate_key) ? `key ${m.activate_key}` : 'no activate key',
+        encBits.length ? encBits.join(', ') : 'encoder unbound',
+        m?.timeout_s ? `reverts after ${m.timeout_s}s` : 'stays until switched',
+      ].join(' · ') }),
+    ]);
+    pick.addEventListener('click', () => { state.modeSel = n; renderModesPanel(); });
+    row.append(pick);
+    if (state.status.active_mode === n) row.append(el('span', { class: 'tag ok', text: 'active' }));
+    const del = el('button', { type: 'button', class: 'ghost small danger', text: 'Delete', 'aria-label': `Delete mode ${n}` });
+    del.addEventListener('click', () => {
+      if (!confirm(`Delete mode “${n}”? Bindings that activate it will stop working.`)) return;
+      delete currentProfile().modes[n];
+      if (!Object.keys(currentProfile().modes).length) delete currentProfile().modes;
+      if (state.scope === n) { state.scope = null; adoptScopeChange(); }
+      if (state.modeSel === n) state.modeSel = null;
+      touch(null);
+      renderScopeSelect(); renderModesPanel(); renderBindingsPanel();
+    });
+    row.append(el('div', { class: 'lrow-acts' }, [del]));
+    list.append(row);
+  }
+
+  const box = $('mode-edit');
+  const m = state.modeSel ? modes[state.modeSel] : null;
+  box.hidden = !m;
+  if (!m) return;
+  $('mode-name').textContent = state.modeSel;
+  if (document.activeElement !== $('mode-key')) $('mode-key').value = state.modeSel;
+
+  const sel = $('mode-actkey');
+  if (!sel.options.length) {
+    sel.append(el('option', { value: '', text: '(none)' }));
+    for (let i = 0; i < KEY_COUNT; i++) sel.append(el('option', { value: String(i), text: `key ${i}` }));
+  }
+  sel.value = Number.isInteger(m.activate_key) ? String(m.activate_key) : '';
+
+  const to = Number(m.timeout_s) || 0;
+  $('rng-modeto').value = String(clamp(Math.round(to), 0, 60));
+  $('out-modeto').textContent = to ? `${Math.round(to)} s of encoder silence` : 'never (stays until switched)';
+
+  const has = isHex6(m.flash);
+  $('mode-flash-on').checked = has;
+  const v = has ? m.flash.toLowerCase() : 'ffffff';
+  $('mode-flash').value = '#' + v;
+  if (document.activeElement !== $('mode-flash-hex')) $('mode-flash-hex').value = v;
+  $('mode-flash').disabled = $('mode-flash-hex').disabled = !has;
+
+  const bits = [];
+  const actKey = m.activate_key;
+  if (Number.isInteger(actKey)) {
+    const binding = (currentProfile()?.keys || []).find((k) => k?.index === actKey)?.on?.press;
+    if (!binding || binding.mode !== state.modeSel) {
+      bits.push(`activate_key says key ${actKey}, but that key's press is not bound to this mode — `
+        + 'activate_key only tells the UI and the LED which key belongs to the mode. Bind the key '
+        + `to “Activate mode → ${state.modeSel}” to reach it from the pad.`);
+    }
+  } else {
+    bits.push('No activate_key, so nothing on the board is marked as this mode\'s key. Bind a key to “Activate mode” to reach it from the pad.');
+  }
+  if (!ENC_TRIGGERS.some((k) => m.encoder && m.encoder[k])) {
+    bits.push('This mode rebinds nothing on the encoder yet, which is usually the point of a mode.');
+  }
+  $('mode-note').textContent = bits.join(' ');
+}
+
+/** One-line summary of a binding, for lists. */
+function describeBinding(b) {
+  const k = actionKeyOf(b);
+  if (!k) return 'nothing';
+  const v = String(b[k] ?? '');
+  return `${k}${v ? ' ' + (v.length > 22 ? v.slice(0, 21) + '…' : v).replace(/\n/g, ' ⏎ ') : ''}`;
+}
+
+function mutateMode(fn) {
+  const m = state.modeSel ? profileModes()[state.modeSel] : null;
+  if (!m) return;
+  fn(m);
+  touch(null);
+  renderModesPanel();
+}
+
+/* ==================================================== 16f. panels: events */
+
+let eventTimer = null;
+const EVENT_POLL_MS = 700;
+const EVENT_POLL_IDLE_MS = 4000;
+const EVENT_KEEP = 200;
+
+async function pollEvents() {
+  clearTimeout(eventTimer);
+  if (!state.evPoll) { eventTimer = null; return; }
+  const res = await api.getEvents(state.eventSeq);
+  if (res.ok && res.data && Array.isArray(res.data.events)) {
+    state.inputSeen = !!res.data.input_events_seen;
+    if (res.data.events.length) {
+      // The daemon keeps a bounded deque, so a long gap can leave holes. Ordering is all this
+      // needs, and `seq` gives it.
+      for (const e of res.data.events) {
+        state.events.push(e);
+        state.eventSeq = Math.max(state.eventSeq, Number(e.seq) || 0);
+        flagHit(e);
+      }
+      if (state.events.length > EVENT_KEEP) state.events.splice(0, state.events.length - EVENT_KEEP);
+      renderEventFeed();
+    } else if (Number(res.data.latest_seq) > state.eventSeq) {
+      state.eventSeq = Number(res.data.latest_seq);
+    }
+    renderEventState();
+  }
+  eventTimer = setTimeout(pollEvents, state.daemonReachable ? EVENT_POLL_MS : EVENT_POLL_IDLE_MS);
+}
+
+/** Light the control an event refers to, on the board. */
+function flagHit(e) {
+  const args = Array.isArray(e.args) ? e.args : [];
+  if (e.event === 'key') {
+    const i = Number(args[0]);
+    if (Number.isInteger(i)) noteHit('key', i, e.source === 'device' ? 'device' : 'injected');
+  } else if (e.event === 'enc') {
+    noteHit('encoder', 0, e.source === 'device' ? 'device' : 'injected');
+  } else if (e.event === 'touch') {
+    noteHit('touch', 0, e.source === 'device' ? 'device' : 'injected');
+  }
+}
+
+/** What an event means, in the terms the config uses. */
+function explainEvent(e) {
+  const args = Array.isArray(e.args) ? e.args : [];
+  if (e.event === 'key') {
+    const i = Number(args[0]);
+    const label = Number.isInteger(i) ? keyLabelOf(i) : '';
+    const strip = Number.isInteger(i) ? state.geom?.keys?.[i]?.strip : null;
+    if (!Number.isInteger(i) || i < 0 || i >= KEY_COUNT) return `key index ${args[0]} is outside 0–${KEY_COUNT - 1} — the firmware must report LOGICAL indices`;
+    const kinds = boundKinds('key', i);
+    return `logical key ${i}${label ? ` “${label}”` : ''}${strip === null || strip === undefined ? '' : ` (LED strip index ${strip})`}`
+      + ` · ${args[1] || 'edge'}${kinds.length ? ` · bound: ${kinds.join(', ')}` : ' · nothing bound'}`;
+  }
+  if (e.event === 'enc') {
+    const w = args[0] || '';
+    if (w === 'cw' || w === 'ccw') return `encoder detent ${w}${bindingAt('encoder', 0, w) ? ` → ${describeBinding(bindingAt('encoder', 0, w))}` : ' · nothing bound'}`;
+    return `encoder button ${w}`;
+  }
+  if (e.event === 'touch') return 'capacitive touch pad' + (args.length ? ` ${args.join(' ')}` : ' (a tap: one line, no down/up)');
+  if (e.event === 'rear') return 'rear button' + (args.length ? ` ${args.join(' ')}` : ' (a tap: one line, no down/up)');
+  if (e.event === 'batt') return `battery ${args[0]}%${args[1] === '1' ? ', charging' : ''}`;
+  return '—';
+}
+
+function renderEventFeed() {
+  const body = $('ev-feed');
+  body.textContent = '';
+  const list = state.events.slice(-60).reverse();
+  if (!list.length) {
+    body.append(el('tr', {}, [el('td', { colspan: '4', class: 'miss', text: 'nothing yet' })]));
+  }
+  for (const e of list) {
+    const t = new Date((Number(e.at) || 0) * 1000);
+    const hh = Number.isFinite(t.getTime()) ? t.toTimeString().slice(0, 8) + '.' + String(t.getMilliseconds()).padStart(3, '0') : '—';
+    body.append(el('tr', { 'data-source': e.source === 'device' ? 'device' : 'injected' }, [
+      el('td', { text: hh }),
+      el('td', {}, [el('span', { class: 'tag ' + (e.source === 'device' ? 'ok' : 'inj'), text: e.source === 'device' ? 'pad' : 'injected' })]),
+      el('td', { text: e.line || `${e.event} ${(e.args || []).join(' ')}` }),
+      el('td', { class: 'wrap', text: explainEvent(e) }),
+    ]));
+  }
+  const last = state.events[state.events.length - 1];
+  $('ev-last-what').textContent = last ? (last.line || last.event) : 'no events yet';
+  $('ev-last-what').dataset.source = last ? (last.source === 'device' ? 'device' : 'injected') : '';
+  $('ev-last-note').textContent = last
+    ? `${last.source === 'device' ? 'from the pad' : 'injected by this page'} — ${explainEvent(last)}`
+    : 'Press a key on the pad, or use a Test button in the Bindings tab.';
+}
+
+function renderEventState() {
+  const seen = state.inputSeen === null ? state.status.input_events : state.inputSeen;
+  const pill = $('ev-state');
+  const warn = $('ev-warn');
+  warn.textContent = '';
+  if (state.daemonReachable === false) {
+    pill.textContent = 'no daemon';
+    warn.hidden = false;
+    warn.append(el('li', { text: 'No daemon is answering, so there are no events to read and no way to inject one. Start it with ./.venv/bin/libremicro.' }));
+    return;
+  }
+  if (seen) {
+    pill.textContent = 'pad is sending events';
+    warn.hidden = true;
+    return;
+  }
+  pill.textContent = 'no real events yet';
+  warn.hidden = false;
+  warn.append(el('li', { text:
+    'This firmware has never sent an input event. The build on the pad is LED-out only — flash '
+    + 'firmware v2 to get key events (and set LM_ENABLE_UNVERIFIED_INPUTS for the encoder, touch '
+    + 'pad and rear button, whose pins are not confirmed yet).' }));
+  warn.append(el('li', { text:
+    'Until then, Test in the Bindings tab injects events through POST /api/simulate. They run the '
+    + 'daemon\'s real recogniser and dispatcher — hold and double timing included — so a binding '
+    + 'that works when injected will work when the pad sends the same line.' }));
+}
+
 /* ===================================================== 17. chrome: top bar */
 
 function setDaemonReachable(on) {
@@ -1702,6 +3093,7 @@ function renderBanner() {
   // flashing in for the starter config and then out again for the real one.
   if (!state.bootDone) return;
   slot.textContent = '';
+  renderKeysBanner(slot);
   // The shipped strip mapping is confirmed hardware, so silence is the normal state: this warns
   // only when the config explicitly says "I overrode this and haven't checked it".
   if (mappingVerified()) return;
@@ -1721,6 +3113,45 @@ function renderBanner() {
           : 'The mapping shown is the confirmed default wiring order; nothing in this config overrides it. Run the sweep to confirm it on this unit, then tick verified.',
       }),
       el('div', { class: 'b-actions' }, [btn]),
+    ]),
+  ]));
+}
+
+/* A shortcut binding on a machine with no helper, or no Accessibility trust, does nothing at all
+ * and says nothing about it — the single worst failure mode in this app. So it gets a banner, not
+ * a line in a panel, and it explains where the permission actually attaches. */
+function renderKeysBanner(slot) {
+  if (state.capsDismissed) return;
+  const caps = state.status.keys;
+  if (!caps || typeof caps !== 'object') return;
+  const built = caps.built !== false && caps.helper !== null;
+  const access = caps.accessibility;
+  if (built && access === true) return;
+  const users = countSynthBindings();
+
+  const head = !built
+    ? '<strong>Keyboard shortcuts cannot work yet: the native helper is not built.</strong>'
+    : access === false
+      ? '<strong>Keyboard shortcuts cannot work yet: the daemon is not trusted for Accessibility.</strong>'
+      : '<strong>Keyboard synthesis may not work — Accessibility trust could not be confirmed.</strong>';
+  const body = !built
+    ? `The <code>shortcut</code>, <code>text</code> and media <code>action</code> bindings all go through <code>host/swift/lmkey</code>, which is not built. Until it is, they fail silently. ${caps.hint || 'Build it with: cd host/swift &amp;&amp; swiftc -O -o lmkey lmkey.swift'}`
+    : 'macOS attributes Accessibility to the process that <em>launched</em> the daemon — your Terminal, iTerm, or the launchd job — <em>not</em> to the helper binary. Grant it there, in System Settings › Privacy &amp; Security › Accessibility, then restart the daemon. Synthesised keys are discarded silently until you do.';
+
+  const go = el('button', { type: 'button', class: 'ghost small', text: 'Open bindings' });
+  go.addEventListener('click', () => { showTab('bindings'); $('btn-caps-recheck').focus(); });
+  const recheck = el('button', { type: 'button', class: 'ghost small', text: 'Re-check' });
+  recheck.addEventListener('click', () => refreshStatus());
+  const hide = el('button', { type: 'button', class: 'ghost small', text: 'Dismiss' });
+  hide.addEventListener('click', () => { state.capsDismissed = true; renderBanner(); });
+
+  slot.append(el('div', { class: 'banner', 'data-level': built && access !== false ? 'warn' : 'err', role: 'note' }, [
+    el('span', { class: 'icon', text: '!', 'aria-hidden': 'true' }),
+    el('div', {}, [
+      el('p', { html: head }),
+      el('p', { html: body }),
+      users ? el('p', { text: `${users} binding${users === 1 ? '' : 's'} in this config depend on it.` }) : null,
+      el('div', { class: 'b-actions' }, [go, recheck, hide]),
     ]),
   ]));
 }
@@ -1758,11 +3189,38 @@ function renderProfileSelect() {
   }
   if (state.profile) sel.value = state.profile;
   $('btn-make-active').disabled = !state.profile || state.config?.active_profile === state.profile;
+  renderScopeSelect();
+}
+
+/** The editing-scope picker: the profile's own layer, or one of its modes. */
+function renderScopeSelect() {
+  const sel = $('sel-scope');
+  const names = Object.keys(profileModes());
+  if (state.scope && !names.includes(state.scope)) state.scope = null;
+  sel.textContent = '';
+  sel.append(el('option', { value: '', text: 'profile default' }));
+  for (const n of names) sel.append(el('option', { value: n, text: `mode: ${n}` }));
+  sel.value = state.scope || '';
+  sel.disabled = !names.length;
+  sel.title = names.length
+    ? 'A mode\'s keys, encoder and lighting override the profile\'s while it is active'
+    : 'This profile has no modes — add one in the Profiles tab';
+}
+
+/** Re-render everything that reads the editing scope. */
+function adoptScopeChange() {
+  renderScopeSelect();
+  renderColorPanel();
+  renderEffectPanel();
+  renderBindingsPanel();
+  syncUnderglowEditor();
+  syncStatusSliders();
+  if (state.lastFrame) paint(state.lastFrame);
 }
 
 /* ===================================================== 18. tabs & the JSON */
 
-const TABS = ['color', 'palette', 'effect', 'identify', 'config'];
+const TABS = ['color', 'palette', 'effect', 'bindings', 'profiles', 'events', 'identify', 'config'];
 
 function showTab(name) {
   for (const t of TABS) {
@@ -1777,6 +3235,11 @@ function showTab(name) {
   if (name === 'palette') renderPalettePanel();
   if (name === 'effect') renderEffectPanel();
   if (name === 'identify') renderIdentifyPanel();
+  if (name === 'bindings') renderBindingsPanel();
+  if (name === 'profiles') renderProfilesPanel();
+  if (name === 'events') { renderEventFeed(); renderEventState(); }
+  // Leaving the Bindings tab must not leave a key recorder swallowing every keystroke.
+  if (name !== 'bindings') stopRecording();
 }
 
 function syncJson() {
@@ -1815,8 +3278,50 @@ function localCheck(cfg) {
     }
     const e = p?.lighting?.effect;
     if (e && !EFFECT_NAMES.includes(e.name)) errs.push(`profile ${n}: effect name "${e.name}" is not in the schema enum`);
+    checkTriggers(errs, cfg, `profile ${n}`, p);
+    for (const [mn, m] of Object.entries(p?.modes || {})) {
+      if (!m || typeof m !== 'object') { errs.push(`profile ${n}: mode ${mn} is not an object`); continue; }
+      if (!m.encoder || typeof m.encoder !== 'object') errs.push(`profile ${n}: mode ${mn} must have an encoder object (the schema requires it)`);
+      if (m.activate_key !== undefined && (!Number.isInteger(m.activate_key) || m.activate_key < 0 || m.activate_key > 12)) {
+        errs.push(`profile ${n}: mode ${mn} activate_key ${m.activate_key} outside 0..12`);
+      }
+      if (m.flash !== undefined && !isHex6(m.flash)) errs.push(`profile ${n}: mode ${mn} flash "${m.flash}" is not rrggbb`);
+      if (m.timeout_s !== undefined && !(Number(m.timeout_s) >= 1)) errs.push(`profile ${n}: mode ${mn} timeout_s must be at least 1 (omit it to stay until switched)`);
+      checkTriggers(errs, cfg, `profile ${n} mode ${mn}`, m);
+    }
   }
   return errs;
+}
+
+/** Bindings a document would be rejected for — one action key each, and a value in it. */
+function checkTriggers(errs, cfg, where, owner) {
+  const one = (label, b) => {
+    if (!b || typeof b !== 'object') { errs.push(`${where}: ${label} is not a binding object`); return; }
+    const present = BINDING_KEYS.filter((k) => b[k] !== undefined);
+    if (present.length === 0) { errs.push(`${where}: ${label} has no action — a binding needs exactly one of ${BINDING_KEYS.join(', ')}`); return; }
+    if (present.length > 1) { errs.push(`${where}: ${label} has ${present.length} actions (${present.join(', ')}) — the schema allows exactly one`); return; }
+    const key = present[0];
+    const v = b[key];
+    if (typeof v !== 'string' || !v.trim()) { errs.push(`${where}: ${label} ${key} is empty`); return; }
+    if (key === 'shortcut') {
+      const p = parseSpec(v);
+      if (!p.ok) errs.push(`${where}: ${label} shortcut "${v}" — ${p.error}`);
+    }
+    if (key === 'action' && !ACTION_ENUM.includes(v)) errs.push(`${where}: ${label} action "${v}" is not in the schema enum`);
+    if (b.flash !== undefined && !isHex6(b.flash)) errs.push(`${where}: ${label} flash "${b.flash}" is not rrggbb`);
+  };
+  const scan = (label, t, kinds) => {
+    if (t === undefined) return;
+    if (!t || typeof t !== 'object') { errs.push(`${where}: ${label} is not an object`); return; }
+    for (const [k, b] of Object.entries(t)) {
+      if (!kinds.includes(k)) { errs.push(`${where}: ${label} has no trigger kind "${k}" (one of ${kinds.join(', ')})`); continue; }
+      one(`${label}.${k}`, b);
+    }
+  };
+  for (const k of owner?.keys || []) scan(`key ${k?.index}.on`, k?.on, KEY_TRIGGERS);
+  scan('encoder', owner?.encoder, ENC_TRIGGERS);
+  scan('touch', owner?.touch, KEY_TRIGGERS);
+  scan('rear', owner?.rear, KEY_TRIGGERS);
 }
 
 /* ============================================== 19. load / save / transfer */
@@ -1837,6 +3342,8 @@ function adoptConfig(cfg, { fromDaemon = false } = {}) {
   renderPalettePanel();
   renderEffectPanel();
   renderIdentifyPanel();
+  renderBindingsPanel();
+  renderProfilesPanel();
   syncDeviceSliders();
   syncUnderglowEditor();
   syncStatusSliders();
@@ -1853,7 +3360,7 @@ function syncDeviceSliders() {
 }
 
 function syncUnderglowEditor() {
-  const c = currentLighting()?.underglow;
+  const c = effectiveLighting().underglow;
   ceUnder.show(isHex6(c) ? c : '000000');
 }
 
@@ -1969,6 +3476,7 @@ async function doImport(file) {
 /* ======================================================== 20. status poll */
 
 let statusTimer = null;
+let lastStatusSig = '';
 async function refreshStatus() {
   const res = await api.getStatus();
   if (res.ok && res.data && typeof res.data === 'object') {
@@ -1980,11 +3488,25 @@ async function refreshStatus() {
       active_mode: d.active_mode ?? null,
       battery: d.battery ?? null,
       previewing: !!d.previewing,
+      input_events: d.input_events ?? null,
+      keys: d.keys ?? null,
     };
+    if (state.inputSeen === null && typeof d.input_events === 'boolean') state.inputSeen = d.input_events;
   } else if (!res.reachable) {
-    state.status = { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false };
+    state.status = { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false, input_events: null, keys: null };
   }
   renderTop();
+  renderCapsBox();
+  renderEventState();
+  // The status poll runs every 3 s, and both of these rebuild DOM that can hold focus — so they
+  // only re-render when something they actually show has changed. Otherwise tabbing through the
+  // banner's buttons or the profile list would lose focus every three seconds.
+  const sig = JSON.stringify([state.status.keys, state.status.active_profile, state.status.active_mode, state.capsDismissed]);
+  if (sig !== lastStatusSig) {
+    lastStatusSig = sig;
+    renderBanner();
+    if ($('tab-profiles').getAttribute('aria-selected') === 'true') renderProfilesPanel();
+  }
   clearTimeout(statusTimer);
   statusTimer = setTimeout(() => { refreshStatus(); }, state.daemonReachable ? 3000 : 8000);
 }
@@ -2000,13 +3522,29 @@ function wireDeviceView() {
     if (zone === 'status') { selectLed('status', Number(posKey), null); showTab('color'); return; }
     const i = indexAtPos(zone, posKey);
     if (i === null) { toast('That position has no LED index — check layout.key_rows', 'warn'); return; }
+    // Clicking a key means "this one" in whichever editor is open: stay on Bindings if that is
+    // where the work is, rather than yanking the panel out from under the pointer.
+    const onBindings = $('tab-bindings').getAttribute('aria-selected') === 'true';
+    if (zone === 'keys') state.bind = { control: 'key', index: i };
     selectLed(zone, i, posKey);
-    showTab('color');
+    if (onBindings && zone === 'keys') renderBindingsPanel(); else showTab('color');
   };
 
   svg.addEventListener('click', (ev) => {
     const g = ev.target.closest('.cell-g');
-    if (g) activate(g);
+    if (g) { activate(g); return; }
+    // Pointer shortcut only: the encoder and touch-pad ghosts are not LEDs, so they stay out of
+    // the tab order and out of the accessible tree — the Bindings panel's chips are the
+    // keyboard-reachable way to the same thing.
+    const feat = ev.target.closest('.feat');
+    if (!feat) return;
+    for (const [kind, ref] of svgRefs.feat) {
+      if (ref.g !== feat) continue;
+      if (kind === 'joystick') { toast('The joystick has no bindings in schema v2 — no triggers are defined for it', 'warn', 5000); return; }
+      selectControl(kind === 'touch' ? 'touch' : kind, 0);
+      showTab('bindings');
+      return;
+    }
   });
 
   svg.addEventListener('keydown', (ev) => {
@@ -2366,6 +3904,205 @@ function wireIdentifyPanel() {
   });
 }
 
+function wireBindingsPanel() {
+  $('bind-label').addEventListener('input', (ev) => {
+    const { control, index } = state.bind;
+    if (control !== 'key') return;
+    const v = ev.target.value;
+    if (v) keyEntry(index, true).label = v;
+    else { const k = keyEntry(index); if (k) { delete k.label; pruneKeyEntry(index); } }
+    touch(null);
+    renderControlPicker();
+    if (state.lastFrame) paint(state.lastFrame);
+  });
+
+  $('btn-bind-clear').addEventListener('click', () => {
+    const { control, index } = state.bind;
+    const t = triggersFor(control, index);
+    if (!t || !Object.keys(t).length) { toast('Nothing bound here already', 'warn'); return; }
+    if (!confirm(`Remove every binding on ${controlName(control, index).toLowerCase()}?`)) return;
+    for (const k of Object.keys(t)) delete t[k];
+    cleanupTriggers(control, index);
+    touch(null);
+    renderBindingsPanel();
+  });
+
+  $('btn-caps-recheck').addEventListener('click', () => { refreshStatus(); toast('Asked the daemon to re-check the helper', 'info'); });
+
+  $('rng-hold').addEventListener('input', (ev) => {
+    if (!state.config.device) state.config.device = {};
+    state.config.device.hold_ms = Number(ev.target.value);
+    $('out-hold').textContent = ev.target.value + ' ms';
+    touch(null);
+    refreshTriggerNotes();
+  });
+  $('rng-double').addEventListener('input', (ev) => {
+    if (!state.config.device) state.config.device = {};
+    state.config.device.double_ms = Number(ev.target.value);
+    $('out-double').textContent = ev.target.value + ' ms';
+    touch(null);
+    refreshTriggerNotes();
+  });
+}
+
+function wireProfilesPanel() {
+  $('btn-prof-new').addEventListener('click', () => {
+    const name = uniqueName('profile', profileNames());
+    state.config.profiles[name] = { label: 'New profile' };
+    setProfileEditing(name);
+    touch(null);
+    renderProfilesPanel();
+    $('prof-key').focus();
+    $('prof-key').select();
+  });
+  $('btn-prof-dup').addEventListener('click', () => {
+    const p = currentProfile();
+    if (!p) return;
+    const name = uniqueName((state.profile || 'profile') + '-copy', profileNames());
+    state.config.profiles[name] = clone(p);
+    if (state.config.profiles[name].label) state.config.profiles[name].label += ' copy';
+    setProfileEditing(name);
+    touch(null);
+    renderProfilesPanel();
+  });
+  for (const [id, which] of [['btn-prof-next', 'next'], ['btn-prof-prev', 'prev']]) {
+    $(id).addEventListener('click', async () => {
+      const res = await api.setProfile(which);
+      if (res.ok && res.data && res.data.ok !== false) { toast(`Daemon switched to “${res.data.active_profile}”`, 'ok'); refreshStatus(); }
+      else toast(res.reachable ? 'Daemon refused: ' + ((res.data && (res.data.errors || []).join('; ')) || res.error) : 'No daemon — nothing to switch', 'warn');
+    });
+  }
+
+  $('prof-key').addEventListener('change', (ev) => {
+    const to = ev.target.value.trim();
+    if (!to || !state.profile) { ev.target.value = state.profile || ''; return; }
+    if (!renameProfile(state.profile, to)) { ev.target.value = state.profile; return; }
+    renderProfileSelect();
+    renderProfilesPanel();
+    renderBindingsPanel();
+  });
+  $('prof-label').addEventListener('input', (ev) => {
+    const p = currentProfile();
+    if (!p) return;
+    if (ev.target.value) p.label = ev.target.value; else delete p.label;
+    touch(null);
+    renderProfileSelect();
+  });
+  $('prof-app').addEventListener('input', (ev) => {
+    const p = currentProfile();
+    if (!p) return;
+    if (ev.target.value.trim()) p.auto_activate_app = ev.target.value.trim(); else delete p.auto_activate_app;
+    touch(null);
+  });
+
+  $('btn-mode-new').addEventListener('click', () => {
+    const p = currentProfile();
+    if (!p) return;
+    if (!p.modes || typeof p.modes !== 'object') p.modes = {};
+    const name = uniqueName('mode', Object.keys(p.modes));
+    // `encoder` is required by the schema, so a new mode gets one even though it is empty.
+    p.modes[name] = { encoder: {} };
+    state.modeSel = name;
+    touch(null);
+    renderScopeSelect();
+    renderModesPanel();
+    $('mode-key').focus();
+    $('mode-key').select();
+  });
+  $('btn-mode-clear').addEventListener('click', async () => {
+    const res = await api.setMode(null);
+    if (res.ok && res.data && res.data.ok !== false) { toast('Daemon left the active mode', 'ok'); refreshStatus(); }
+    else toast(res.reachable ? 'Daemon refused: ' + ((res.data && (res.data.errors || []).join('; ')) || res.error) : 'No daemon', 'warn');
+  });
+  $('btn-mode-activate').addEventListener('click', async () => {
+    if (!state.modeSel) return;
+    const res = await api.setMode(state.modeSel);
+    if (res.ok && res.data && res.data.ok !== false) { toast(`Daemon activated mode “${res.data.active_mode}”`, 'ok'); refreshStatus(); }
+    else toast(res.reachable
+      ? 'Daemon refused: ' + ((res.data && (res.data.errors || []).join('; ')) || res.error) + ' — a mode only exists for the daemon once the config is saved'
+      : 'No daemon', 'warn', 6000);
+  });
+  $('btn-mode-bind').addEventListener('click', () => {
+    if (!state.modeSel) return;
+    state.scope = state.modeSel;
+    state.bind = { control: 'encoder', index: 0 };
+    adoptScopeChange();
+    showTab('bindings');
+  });
+  $('btn-mode-light').addEventListener('click', () => {
+    if (!state.modeSel) return;
+    state.scope = state.modeSel;
+    adoptScopeChange();
+    showTab('effect');
+  });
+
+  $('mode-key').addEventListener('change', (ev) => {
+    const from = state.modeSel, to = ev.target.value.trim();
+    const modes = currentProfile()?.modes;
+    if (!from || !to || !modes) { ev.target.value = from || ''; return; }
+    if (to !== from && modes[to]) { toast(`A mode called “${to}” already exists`, 'warn'); ev.target.value = from; return; }
+    if (to === from) return;
+    const next = {};
+    for (const n of Object.keys(modes)) next[n === from ? to : n] = modes[n];
+    currentProfile().modes = next;
+    // keep bindings that activate it pointing at it
+    for (const owner of [currentProfile(), ...Object.values(next)]) {
+      const fix = (t) => { for (const b of Object.values(t || {})) if (b && b.mode === from) b.mode = to; };
+      for (const k of owner?.keys || []) fix(k?.on);
+      fix(owner?.encoder); fix(owner?.touch); fix(owner?.rear);
+    }
+    if (state.scope === from) state.scope = to;
+    state.modeSel = to;
+    touch(null);
+    renderScopeSelect();
+    renderModesPanel();
+    renderBindingsPanel();
+  });
+  $('mode-actkey').addEventListener('change', (ev) => mutateMode((m) => {
+    if (ev.target.value === '') delete m.activate_key; else m.activate_key = Number(ev.target.value);
+  }));
+  $('rng-modeto').addEventListener('input', (ev) => {
+    const v = Number(ev.target.value);
+    $('out-modeto').textContent = v ? `${v} s of encoder silence` : 'never (stays until switched)';
+    const m = state.modeSel ? profileModes()[state.modeSel] : null;
+    if (!m) return;
+    // The schema's minimum is 1; 0 is this slider's way of saying "omit it".
+    if (v < 1) delete m.timeout_s; else m.timeout_s = v;
+    touch(null);
+  });
+  $('mode-flash-on').addEventListener('change', (ev) => mutateMode((m) => {
+    if (ev.target.checked) m.flash = $('mode-flash-hex').value.replace('#', '').toLowerCase() || 'ffffff';
+    else delete m.flash;
+  }));
+  $('mode-flash').addEventListener('input', (ev) => mutateMode((m) => { m.flash = ev.target.value.replace('#', '').toLowerCase(); }));
+  $('mode-flash-hex').addEventListener('input', (ev) => {
+    const v = ev.target.value.replace('#', '').trim().toLowerCase();
+    if (!isHex6(v)) return;
+    const m = state.modeSel ? profileModes()[state.modeSel] : null;
+    if (!m) return;
+    m.flash = v;
+    $('mode-flash').value = '#' + v;
+    touch(null);
+  });
+}
+
+function wireEventsPanel() {
+  $('chk-ev-poll').addEventListener('change', (ev) => {
+    state.evPoll = ev.target.checked;
+    prefs.write('evPoll', state.evPoll);
+    if (state.evPoll) pollEvents(); else clearTimeout(eventTimer);
+  });
+  $('chk-ev-flash').addEventListener('change', (ev) => {
+    state.evFlash = ev.target.checked;
+    prefs.write('evFlash', state.evFlash);
+  });
+  $('btn-ev-clear').addEventListener('click', () => {
+    state.events = [];
+    state.hits.clear();
+    renderEventFeed();
+  });
+}
+
 function wireConfigPanel() {
   $('btn-export').addEventListener('click', () => { doExport(); });
   $('btn-import').addEventListener('click', () => $('file-import').click());
@@ -2397,14 +4134,20 @@ function wireChrome() {
   $('sel-profile').addEventListener('change', (ev) => {
     state.profile = ev.target.value;
     state.sel = null;
+    state.scope = null;
+    state.modeSel = null;
     renderProfileSelect();
-    renderColorPanel();
-    renderEffectPanel();
-    syncUnderglowEditor();
-    syncStatusSliders();
+    adoptScopeChange();
+    renderProfilesPanel();
     renderTop();
     touch(null);
-    if (state.lastFrame) paint(state.lastFrame);
+  });
+  $('sel-scope').addEventListener('change', (ev) => {
+    state.scope = ev.target.value || null;
+    adoptScopeChange();
+    toast(state.scope
+      ? `Editing mode “${state.scope}” — keys, encoder and lighting here override the profile's while it is active`
+      : 'Editing the profile\'s own layer', 'info', 4200);
   });
   $('btn-make-active').addEventListener('click', () => {
     if (!state.profile) return;
@@ -2444,11 +4187,18 @@ function init() {
   $('chk-labels').checked = prefs.read('showLab', false);
   $('chk-anim').checked = prefs.read('anim', true);
   state.anim.playing = $('chk-anim').checked;
+  state.evPoll = prefs.read('evPoll', true);
+  state.evFlash = prefs.read('evFlash', true);
+  $('chk-ev-poll').checked = state.evPoll;
+  $('chk-ev-flash').checked = state.evFlash;
 
   wireTabs();
   wireColorPanel();
   wirePalettePanel();
   wireEffectPanel();
+  wireBindingsPanel();
+  wireProfilesPanel();
+  wireEventsPanel();
   wireIdentifyPanel();
   wireConfigPanel();
   wireChrome();
@@ -2465,6 +4215,7 @@ function init() {
   requestAnimationFrame(tick);
   loadAll();
   refreshStatus();
+  pollEvents();
 }
 
 init();

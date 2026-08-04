@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>LibreMicro — Lighting Studio</title>
+<title>LibreMicro — Studio</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -14,7 +14,7 @@
   <div class="brand">
     <span class="logo" aria-hidden="true"></span>
     <strong>LibreMicro</strong>
-    <span class="sub">Lighting Studio</span>
+    <span class="sub">Studio</span>
   </div>
 
   <div class="statusbar" id="statusbar">
@@ -47,6 +47,13 @@
         <span>Profile</span>
         <select id="sel-profile"></select>
       </label>
+      <!-- Editing scope. A mode's keys / encoder / lighting OVERRIDE the profile's while it is
+           active (dispatch.py's resolution order), so the whole editor switches to that layer
+           rather than each panel growing its own mode picker. -->
+      <label class="field inline">
+        <span>Editing</span>
+        <select id="sel-scope" title="Edit the profile's own layer, or a mode's overrides"></select>
+      </label>
       <button id="btn-make-active" type="button" class="ghost small" title="Set this profile as active_profile in the config">Make active</button>
     </div>
 
@@ -73,6 +80,9 @@
       <button role="tab" id="tab-color"    aria-controls="panel-color"    aria-selected="true"  class="tab">Colour</button>
       <button role="tab" id="tab-palette"  aria-controls="panel-palette"  aria-selected="false" class="tab" tabindex="-1">Palettes</button>
       <button role="tab" id="tab-effect"   aria-controls="panel-effect"   aria-selected="false" class="tab" tabindex="-1">Effect</button>
+      <button role="tab" id="tab-bindings" aria-controls="panel-bindings" aria-selected="false" class="tab" tabindex="-1">Bindings</button>
+      <button role="tab" id="tab-profiles" aria-controls="panel-profiles" aria-selected="false" class="tab" tabindex="-1">Profiles</button>
+      <button role="tab" id="tab-events"   aria-controls="panel-events"   aria-selected="false" class="tab" tabindex="-1">Events</button>
       <button role="tab" id="tab-identify" aria-controls="panel-identify" aria-selected="false" class="tab" tabindex="-1">Identify</button>
       <button role="tab" id="tab-config"   aria-controls="panel-config"   aria-selected="false" class="tab" tabindex="-1">Config</button>
     </div>
@@ -104,7 +114,7 @@
 
       <hr>
 
-      <h3 class="phead">Base layer</h3>
+      <h3 class="phead">Base layer <span class="pill" id="light-scope">—</span></h3>
       <div class="subbox">
         <h4>Underglow base colour</h4>
         <p class="hint">
@@ -196,6 +206,151 @@
       </div>
 
       <p class="hint" id="eff-note"></p>
+    </div>
+
+    <!-- -------------------------------------------------------------- Bindings -->
+    <div class="panel" id="panel-bindings" role="tabpanel" aria-labelledby="tab-bindings" tabindex="0" hidden>
+      <h3 class="phead">Bindings <span class="pill" id="bind-scope">—</span></h3>
+      <p class="hint">
+        What each control <em>does</em>. A binding carries exactly one action — this editor
+        swaps the action rather than letting a second one be added, because the schema's
+        <code>binding</code> is a <code>oneOf</code> and a document with two would be rejected.
+      </p>
+
+      <!-- Rendered from /api/status.keys. shortcut / text / media-action bindings all go through
+           the native helper, and without it they fail silently — so this says so before you spend
+           ten minutes wondering why nothing happened. -->
+      <div class="subbox caps" id="caps-box" hidden>
+        <h4 id="caps-h">Keyboard synthesis</h4>
+        <p class="hint" id="caps-note"></p>
+        <div class="row">
+          <button id="btn-caps-recheck" type="button" class="ghost small">Re-check</button>
+        </div>
+      </div>
+
+      <div class="ctlpick" id="bind-controls" role="group" aria-label="Control to edit"></div>
+      <p class="hint" id="bind-shared" hidden></p>
+
+      <div class="row" id="bind-keymeta">
+        <!-- only keys have a label in the schema; the clear button applies to any control -->
+        <label class="field inline grow" id="bind-label-field"><span>Label</span>
+          <input type="text" id="bind-label" spellcheck="false" autocomplete="off" placeholder="Slack"></label>
+        <button id="btn-bind-clear" type="button" class="ghost small danger">Clear all bindings</button>
+      </div>
+
+      <div id="bind-triggers" class="trigstack"></div>
+
+      <div class="subbox">
+        <h4>Trigger timing <span class="pill" id="timing-scope">device</span></h4>
+        <p class="hint" id="timing-note"></p>
+        <div class="grid2">
+          <label class="field"><span>Hold fires after <output id="out-hold"></output></span>
+            <input type="range" id="rng-hold" min="50" max="5000" step="10"></label>
+          <label class="field"><span>Double-tap window <output id="out-double"></output></span>
+            <input type="range" id="rng-double" min="50" max="2000" step="10"></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- -------------------------------------------------------------- Profiles -->
+    <div class="panel" id="panel-profiles" role="tabpanel" aria-labelledby="tab-profiles" tabindex="0" hidden>
+      <h3 class="phead">Profiles</h3>
+      <p class="hint">
+        One profile is active at a time. <code>active_profile</code> is what the daemon loads at
+        startup; <em>Switch now</em> changes the running daemon without saving. Order matters —
+        it is the order <code>profile_next</code> / <code>prev</code> cycle in.
+      </p>
+      <div class="row">
+        <button id="btn-prof-new" type="button" class="ghost small">New profile</button>
+        <button id="btn-prof-dup" type="button" class="ghost small">Duplicate</button>
+        <span class="spacer"></span>
+        <button id="btn-prof-prev" type="button" class="ghost small" title="POST /api/profile {profile:'prev'}">◀ Switch prev</button>
+        <button id="btn-prof-next" type="button" class="ghost small" title="POST /api/profile {profile:'next'}">Switch next ▶</button>
+      </div>
+
+      <div id="prof-list" class="rowlist"></div>
+
+      <div class="subbox">
+        <h4>Selected profile <span class="pill" id="prof-name">—</span></h4>
+        <div class="grid2">
+          <label class="field"><span>Name (config key)</span>
+            <input type="text" id="prof-key" spellcheck="false" autocomplete="off"></label>
+          <label class="field"><span>Label</span>
+            <input type="text" id="prof-label" spellcheck="false" autocomplete="off" placeholder="Everyday"></label>
+        </div>
+        <!-- the inner span keeps this one flex item: .field > span spreads its children apart -->
+        <label class="field"><span><span>Auto-activate for app (<code>auto_activate_app</code>)</span></span>
+          <input type="text" id="prof-app" spellcheck="false" autocomplete="off" placeholder="Terminal"></label>
+        <p class="hint">Switches to this profile whenever that application becomes frontmost. Exact application name, as <code>open -a</code> takes it.</p>
+      </div>
+
+      <hr>
+
+      <h3 class="phead">Modes in <span class="pill" id="mode-owner">—</span></h3>
+      <p class="hint">
+        A mode is a temporary layer: activating it flashes a key, rebinds the encoder, and can
+        override per-key bindings, colours and lighting until it times out or you switch away.
+        Bind a key to <em>Activate mode</em> to reach it from the pad.
+      </p>
+      <div class="row">
+        <button id="btn-mode-new" type="button" class="ghost small">New mode</button>
+        <span class="spacer"></span>
+        <button id="btn-mode-clear" type="button" class="ghost small" title="POST /api/mode {mode:null}">Leave mode now</button>
+      </div>
+      <div id="mode-list" class="rowlist"></div>
+
+      <div class="subbox" id="mode-edit" hidden>
+        <h4>Selected mode <span class="pill" id="mode-name">—</span></h4>
+        <div class="grid2">
+          <label class="field"><span>Name (config key)</span>
+            <input type="text" id="mode-key" spellcheck="false" autocomplete="off"></label>
+          <label class="field"><span>Activate key</span><select id="mode-actkey"></select></label>
+          <label class="field"><span>Revert after <output id="out-modeto"></output></span>
+            <input type="range" id="rng-modeto" min="0" max="60" step="1"></label>
+          <label class="field"><span>Flash on activate</span>
+            <span class="swatchrow"><input type="checkbox" id="mode-flash-on" aria-label="Flash on activate">
+              <input type="color" id="mode-flash" aria-label="Mode flash colour">
+              <input type="text" id="mode-flash-hex" class="ce-hex" spellcheck="false" maxlength="7" aria-label="Mode flash hex"></span></label>
+        </div>
+        <div class="row">
+          <button id="btn-mode-bind" type="button" class="ghost small">Edit this mode's bindings…</button>
+          <button id="btn-mode-light" type="button" class="ghost small">Edit this mode's lighting…</button>
+          <span class="spacer"></span>
+          <button id="btn-mode-activate" type="button" class="ghost small">Activate now</button>
+        </div>
+        <p class="hint" id="mode-note"></p>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------------- Events -->
+    <div class="panel" id="panel-events" role="tabpanel" aria-labelledby="tab-events" tabindex="0" hidden>
+      <h3 class="phead">Input events <span class="pill" id="ev-state">—</span></h3>
+      <p class="hint">
+        Everything the daemon has seen on the input side, newest first — real events from the pad
+        and events this page injected with a <em>Test</em> button, never mixed up. This is the
+        mapping check: press a physical key and watch which logical index arrives.
+      </p>
+      <ul class="errs warnlist" id="ev-warn" hidden></ul>
+
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chk-ev-poll" checked> Poll <code>/api/events</code></label>
+        <label class="chk"><input type="checkbox" id="chk-ev-flash" checked> Highlight on the board</label>
+        <span class="spacer"></span>
+        <button id="btn-ev-clear" type="button" class="ghost small">Clear this list</button>
+      </div>
+
+      <div class="mapcheck" id="ev-last" aria-live="polite">
+        <span class="pill big" id="ev-last-what">no events yet</span>
+        <span class="hint" id="ev-last-note"></span>
+      </div>
+
+      <div id="ev-table-wrap" class="tablewrap feedwrap">
+        <table class="idtable feed">
+          <caption class="sr">Recent input events, newest first</caption>
+          <thead><tr><th>Time</th><th>Source</th><th>Event</th><th>Means</th></tr></thead>
+          <tbody id="ev-feed"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- -------------------------------------------------------------- Identify -->
