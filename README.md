@@ -21,28 +21,33 @@ UI. The goal is a full open-source alternative to Work Louder's Input software. 
 
 ## Status
 
-- ✅ **Per-key + underglow RGB working** under custom firmware (the long-standing "LEDs never
-  light" blocker is solved — it was an undriven GPIO36 power rail + battery-backed pad holds;
-  see [docs/HARDWARE.md](docs/HARDWARE.md)).
-- ✅ Three PWM status/"touch" LEDs controllable.
-- ✅ Key-matrix pin map fully reverse-engineered and verified.
-- ✅ **Host daemon core** — config schema v2 with validation and v1 migration, 16 palettes,
-  10 animated effects, perceptual (OKLab) colour, frame compositing and streaming,
-  export/import, and a local HTTP API. 56 tests, no device required.
-- ✅ **Local web UI** — layout-accurate device view, palette and effect designer with live
-  on-device preview, identify sweep, export/import.
-- ✅ **LED index mapping confirmed** on hardware (a serpentine starting bottom-right), shipped
-  as a default so spatial effects are correct out of the box.
-- ✅ **Bindings** — app launch, keyboard chords, typed text, shell/script/AppleScript with
+**Working on hardware.** Custom firmware v2 is flashed and every input reports:
+
+- ✅ **Per-key + underglow RGB**, with the strip mapping confirmed by identify sweep (a
+  serpentine from the bottom-right) and shipped as a default, so spatial effects are correct
+  out of the box.
+- ✅ **13 keys**, reporting stable logical indices.
+- ✅ **Rotary encoder**, quadrature matched to the vendor's own decoder — reversal-reset and
+  hardware glitch filtering included, which is what stopped it feeling erratic.
+- ✅ **Capacitive touch pad** and the **analog joystick** (two ADC axes, eight bindable
+  directions, calibrated against the pad's real rest point rather than stock's assumed one).
+- ✅ **Battery reporting** from the MAX77972 over I²C — which incidentally proved this repo's
+  own note wrong: SCL is GPIO 18, not 9.
+- ✅ **Bindings**: app launch, keyboard chords, typed text, shell/script/AppleScript with
   trigger context, built-in actions, press/release/hold/double, modes with encoder rebinding,
   and profiles.
-- 🟡 **Firmware v2** (input events + batched frame writes) — written and compiling, **not yet
-  flashed**. Until it is, bindings fire from injected events (`POST /api/simulate`) rather than
-  real presses. **This is the critical path.**
-- 📋 Notification watchers, agent control surface.
-- 📋 Power on/off, staged idle sleep + battery reporting, BLE HID standalone mode.
+- ✅ **Local web UI**: layout-accurate device view, palette and effect designer with live
+  preview, binding editor with a shortcut recorder, per-trigger testing, and an event feed.
+- ✅ **Feedback on the pad**: volume shows as a bar across the underglow, because macOS gives
+  no overlay for a programmatic volume change.
+- 🟡 **Rear button** — pin confirmed, deliberately off: stock arms a ULP watcher that resets
+  the device when that pin goes low. See [docs/HARDWARE.md](docs/HARDWARE.md).
+- 🟡 **Notification watchers** and the **Claude Code control surface** — built and tested, not
+  yet proven against a live session or a real unread count.
+- 📋 Idle sleep, power-off, BLE HID standalone mode.
 
-Phased plan with acceptance criteria: [docs/ROADMAP.md](docs/ROADMAP.md).
+Phased plan and the calibration constants that had to be measured on hardware:
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Layout
 

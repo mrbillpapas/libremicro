@@ -158,9 +158,28 @@ class TestLinkOverPty(unittest.TestCase):
         # frame to diff against: 13 + `u all` + 3 status = 17 lines.
         self.link.send_frame(Frame([parse_hex(f"{i:02x}0000") for i in range(13)]))
         raw = self.dev.read_lines()
-        self.assertEqual(len([l for l in raw if l.startswith("k ")]), 13)
-        self.assertEqual(len(raw), 17)
+        # send_frame also asks `ver` until answered, so filter capability chatter out of the
+        # frame accounting.
+        frame_lines = [l for l in raw if l != "ver"]
+        self.assertEqual(len([l for l in frame_lines if l.startswith("k ")]), 13)
+        self.assertEqual(len(frame_lines), 17)
         self.assertTrue(all(line and not line.endswith("\r") for line in raw))
+
+    def test_capabilities_are_queried_and_retried(self):
+        # One `ver` can be lost in a device's boot output, and a v2 pad then gets treated as
+        # v1 — no batched frames, no battery. So it retries rather than asking once.
+        f = Frame([parse_hex("010203")] * 13)
+        self.link.send_frame(f)
+        self.assertIn("ver", self.dev.read_lines())
+        self.link._ver_asked_at = 0.0                 # pretend the retry window elapsed
+        self.link.send_frame(f.copy())
+        self.assertIn("ver", self.dev.read_lines(), "should retry while unanswered")
+        # Once the firmware answers, it must stop asking.
+        self.link._handle_line("ok ver 2 keys=13 under=8 frames=1 events=key batt=ok")
+        self.assertEqual(self.link.firmware["version"], 2)
+        self.link._ver_asked_at = 0.0
+        self.link.send_frame(f.copy())
+        self.assertNotIn("ver", self.dev.read_lines(), "answered, so stop asking")
 
     # --- reading ------------------------------------------------------------
 

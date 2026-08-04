@@ -99,6 +99,8 @@ class Link:
         self.saw_input_event = False
         # Filled in from the firmware's `ver` reply. None means "not asked yet / v1".
         self.firmware: dict | None = None
+        self._ver_asked_at = 0.0
+        self._ver_attempts = 0
 
     # --- connection ---------------------------------------------------------
 
@@ -135,10 +137,9 @@ class Link:
         self._last = None
         self._last_brightness = None
         self.firmware = None
+        self._ver_asked_at = 0.0
+        self._ver_attempts = 0
         self._start_reader()
-        # Ask what this firmware can do rather than assuming. v1 answers `err unknown`,
-        # which leaves self.firmware None and keeps us on the per-pixel path.
-        self.send("ver")
         return True
 
     def close(self) -> None:
@@ -248,10 +249,29 @@ class Link:
         if self.send("clear"):
             self._last = Frame.blank()
 
+    def _maybe_ask_ver(self) -> None:
+        """Ask what this firmware supports, retrying until answered.
+
+        A single query is not enough in practice: connecting immediately after a flash means
+        the reply can be lost in the device's own boot output, and then the host silently
+        treats a v2 device as v1 — no batched frames, no battery, and a UI that says the
+        firmware can't report presses. Three tries, two seconds apart, then stop asking; v1
+        genuinely never answers and shouldn't be nagged forever.
+        """
+        if self.firmware is not None or self._ver_attempts >= 3:
+            return
+        now = time.monotonic()
+        if now - self._ver_asked_at < 2.0:
+            return
+        self._ver_asked_at = now
+        self._ver_attempts += 1
+        self.send("ver")
+
     def send_frame(self, frame: Frame, force: bool = False) -> bool:
         """Push a frame, writing only the pixels that changed since the last one."""
         if not self.ensure_connected():
             return False
+        self._maybe_ask_ver()
 
         prev = None if force else self._last
         lines = list(self._frame_lines(frame, prev))

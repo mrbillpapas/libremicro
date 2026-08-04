@@ -361,8 +361,12 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 #ifndef LM_JOY_ROTATE_STEPS
 #define LM_JOY_ROTATE_STEPS 0     // each step = 45 degrees, counter-clockwise
 #endif
+// MEASURED: pushing away from the user reported `n` (correct) but pushing right reported
+// `w`. North being right rules out a rotation — a rotation would have moved it too — so the
+// X axis is simply mirrored relative to the maths. One flip fixes east/west and the
+// diagonals without disturbing north/south.
 #ifndef LM_JOY_INVERT_X
-#define LM_JOY_INVERT_X 0
+#define LM_JOY_INVERT_X 1
 #endif
 #ifndef LM_JOY_INVERT_Y
 #define LM_JOY_INVERT_Y 0

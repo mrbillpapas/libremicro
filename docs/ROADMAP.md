@@ -4,54 +4,46 @@ Sequenced delivery plan for the scope in [`VISION.md`](../VISION.md). Phases are
 each one ends with something demonstrable, and so the hardware-blocked work sits behind work that
 isn't blocked.
 
-## Start here
-
-Three things need a human, in this order.
-
-**1. Flash firmware v2.** It's written and compiles; nothing else can proceed without it.
-Until it's flashed, bindings only fire from `POST /api/simulate`, never from the pad.
-
-```bash
-P=$(./scripts/enter_bootloader.sh)
-./.venv/bin/esptool --port "$P" --chip esp32s3 write-flash 0x10000 firmware/.pio/build/cm2/firmware.bin
-```
-
-Then verify in this order: LEDs still light → each key gives exactly one `down` and one `up`
-→ **the orientation** (top-left should report `key 0`, bottom-right `key 12`). The web UI's
-event feed shows what arrived. Also check the boot log for `# batt gauge 0x36 acked on SDA=8
-SCL=…`, which settles whether I²C SCL is 18 or 9 — the firmware probes both because this repo's
-notes and the vendor firmware disagree. If it's transposed, fix `MTX_TO_LOGICAL` in `firmware/src/main.c`
-— that's the one assumption left in the key path. Keep [`RECOVERY.md`](RECOVERY.md) open;
-`firmware/README.md` records a boot-loop on an earlier revision.
-
-The encoder, touch pad and rear button are behind `LM_ENABLE_UNVERIFIED_INPUTS`, off by
-default. Their pins are now confirmed ([`PIN-VERIFICATION.md`](PIN-VERIFICATION.md)), but read
-the GPIO 2 hazards in [`HARDWARE.md`](HARDWARE.md) first — stock's rear-button rescue arms a ULP
-watcher that resets the device on a rear press, and our own flashing procedure is what arms it.
-
-**2. Grant two macOS permissions**, both to whatever launches the daemon (Terminal/iTerm, or the
-launchd job) rather than to the daemon or its helpers — macOS attributes them to the responsible
-process. Without these, shortcut bindings and notification watchers silently do nothing:
-
-- **Accessibility** — needed for keyboard synthesis and for reading Dock badges.
-- **Automation → System Events** — needed for the watchers' Dock query.
-
-`GET /api/status` reports both under `keys`, and the web UI warns up front.
-
-**3. Confirm the matrix orientation and bind your keys.** The LED mapping is already confirmed
-and shipped; the input side is the remaining unknown, and pressing each key with the event feed
-open is how it gets settled.
-
 ## Where we actually are
 
-The LED-out half **works on hardware**: custom firmware is flashed and driving 13 per-key LEDs,
-8 underglow LEDs and 3 PWM status LEDs, with the strip-index mapping confirmed by identify
-sweep. The lighting engine, config layer, web UI and full binding dispatch are all built.
+**The pad works.** Custom firmware v2 is flashed and running on hardware. Keys, the rotary
+encoder, the touch pad, the joystick, per-key and underglow RGB, and battery reporting are all
+live and confirmed on the device, driven by a host daemon with a local web UI.
 
-What the pad still can't do is tell the host that you pressed something. Firmware v2 fixes that
-and is written, but not yet flashed — so bindings currently fire from injected events rather
-than real presses. Everything downstream of a keypress (notifications, agent control) is being
-built against that same injected path, which means it will work the moment v2 lands.
+Confirmed on hardware, not just written:
+
+| | |
+|---|---|
+| LED strip mapping | serpentine from the bottom-right; shipped as a source default |
+| Key matrix | 13 keys reporting logical indices |
+| Encoder | quadrature matched to the vendor's own decoder, direction calibrated |
+| Touch pad | GPIO 14, both edges |
+| Joystick | analog on ADC1, eight bindable directions, orientation calibrated |
+| Battery | MAX77972 over I²C — and it settled that SCL is 18, not 9 |
+| Bindings | app launch, keyboard chords, text, scripts, modes, profiles |
+
+What is **not** yet confirmed on hardware: the rear button (deliberately off — see the GPIO 2
+hazard below), notification watchers, and the agent control surface. Those are built and tested
+but have not been exercised against a live session or a real unread count.
+
+### The rear button, and why it stays off
+
+Its pin is confirmed (GPIO 2). The problem is that stock arms a ULP-RISCV watcher on that pin
+which forces a hardware reset when it goes low — and `scripts/enter_bootloader.sh` is what arms
+it, so it is probably live on any pad that has just been flashed. With it running, pressing rear
+reboots the device. `LM_ENABLE_REAR` is therefore opt-in, and enabling it means either clearing
+`RTC_CNTL_ULP_CP_SLP_TIMER_EN` or power-cycling without going through that RPC first.
+
+### Calibration constants that had to be measured
+
+Four things could only be settled by testing on the physical device, and each is a single
+constant so a different unit can be corrected in one place:
+
+- `LM_ENC_INVERT` — which rotation is clockwise depends on PCB wiring.
+- `LM_JOY_INVERT_X` — pushing up read as `n` correctly but right read as `w`, so the X axis is
+  mirrored. North being right is what ruled out a rotation.
+- `LM_JOY_REST_X/Y` = 1928, not the 2047.5 stock hard-codes, with asymmetric travel either side.
+- `LM_TOUCH_ACTIVE_HIGH` — the vendor ISR passed the level uninverted, unlike its siblings.
 
 ## Phase 0 — Foundations ✅ **built**
 
@@ -88,7 +80,7 @@ The first thing a user can actually *use*, and it needs no firmware change.
 **Done when:** someone can open a local URL, design a lighting setup by clicking, watch it apply
 to the device in real time, export it, and re-import it on a fresh machine. ✅
 
-## Phase 2 — Input events: firmware v2 🟡 **written, not flashed**
+## Phase 2 — Input events: firmware v2 ✅ **flashed and confirmed on hardware**
 
 The code exists and compiles clean (`firmware/src/main.c`): key matrix scanning, `key <i>
 down`/`up` events carrying **logical** indices, and the batched `kf`/`uf` frame commands.
@@ -97,11 +89,9 @@ their pins *are* now confirmed, but stock's ULP rescue watcher on GPIO 2 can res
 a rear press and our own flashing procedure is what arms it, so enabling that block is a
 deliberate second step rather than the default.
 
-**What's left is a human flashing it**, then verifying in this order: LEDs still light; each
-key gives exactly one `down` and one `up`; and the orientation — top-left should report
-`key 0` and bottom-right `key 12`. If it's transposed, the fix is one lookup table
-(`MTX_TO_LOGICAL`). Keep [`RECOVERY.md`](RECOVERY.md) open: `firmware/README.md` records a
-boot-loop on an earlier revision, so step one is a real risk rather than a formality.
+Flashed. LEDs still light, keys report correctly, and the matrix orientation came out right
+first time — so `MTX_TO_LOGICAL`, generated from `layout.py` rather than hand-derived, needed no
+correction. The encoder, touch pad and joystick are live too; only the rear button is held back.
 
 This was the gate, and both of its prerequisites are now done:
 
@@ -114,7 +104,7 @@ This was the gate, and both of its prerequisites are now done:
 
 **Done when:** every physical input produces exactly one correct event line, with no ghosting from
 matrix scanning and no missed encoder detents during fast rotation, while LED commands continue to
-work on the same connection. — *pending a flash; none of this is confirmed on hardware yet.*
+work on the same connection. ✅
 
 ## Phase 3 — Bindings: launcher, shortcuts, scripts ✅ **built**
 
@@ -180,7 +170,7 @@ Driven by Claude Code hooks rather than polling, which is what makes *waiting-fo
 observable at all. Watching the session transcript was investigated and rejected: a session
 sitting on a permission prompt writes nothing, so the state that matters most is invisible to it.
 
-## Phase 8 — Power, sleep and battery (firmware) 🟡 **battery slice written, not flashed**
+## Phase 8 — Power, sleep and battery (firmware) 🟡 **battery confirmed on hardware; sleep still to do**
 
 - Deliberate **power off** via long-press that survives unplugging: latch pads into the RTC
   domain, deep-sleep, wake on the same button — and **release holds at boot**, the exact step whose
@@ -195,7 +185,8 @@ becomes annoying in daily use — it's independent of Phases 3–7.
 **Done when:** the pad powers off and back on cleanly, sleeps on idle and wakes on input, and
 reports battery state to the host.
 
-Battery reporting is written and compiles: `batt <pct> <0|1>` on change, plus a `batt` command
+Battery reporting is live on hardware — the gauge acked on the first flash and reports a
+plausible level, voltage and charge state. Implementation: `batt <pct> <0|1>` on change, plus a `batt` command
 that dumps the raw gauge registers. Read-only, never writes a register, never touches
 charge-enable. The MAX77972 has no public datasheet, so the register map was decoded from stock
 (see [`HARDWARE.md`](HARDWARE.md)) — and that turned up a likely error in this repo's own notes:
@@ -228,3 +219,32 @@ deliberately last: the tethered USB experience is where the interesting product 
   [`RECOVERY.md`](RECOVERY.md) current and take a flash backup before each firmware milestone.
 - **Don't build the feature matrix.** Matching Work Louder Input feature-for-feature is the
   outcome, not the method. Ship the four original use cases well first.
+
+## Phase 10 — Feedback on the pad itself
+
+Started, and worth naming as its own phase because it changes what the device is for.
+
+macOS shows no on-screen overlay when volume is set programmatically, and the media key that
+does show one only moves in ~6.25% jumps — so smooth volume and visible volume looked mutually
+exclusive. They are not: the pad is under the user's hand and the underglow ring reads as a
+scale. `Renderer.bar()` now shows volume there, with a partially-lit leading segment for
+resolution finer than eight steps.
+
+The general lesson is that this hardware is a *display*, not only an input. Obvious extensions:
+battery level on demand, agent status (already mapped), mode indication, and a watcher summary.
+
+**Done when:** any level or state the daemon knows about can be shown on the pad without a
+screen, and the pad is the preferred place to show it.
+
+## Sequencing notes and risks — current
+
+- **Rear button** is the one input still dark, and the blocker is the ULP reset watcher rather
+  than anything unknown about the pin.
+- **Watchers and the agent surface** are built and unit-tested but unproven against a live Slack
+  unread count or a running Claude Code session. Both need macOS Accessibility and Automation
+  granted to whatever launches the daemon.
+- **Idle sleep and power-off** remain, and they inherit the same GPIO 2 hazard as the rear button
+  plus stock's wait-for-release guard before arming ext0.
+- **A daemon launched from a sandboxed shell cannot change system volume.** Reads succeed and
+  writes are silently swallowed, which is indistinguishable from broken hardware and cost real
+  debugging time. Launch it from a normal terminal.
