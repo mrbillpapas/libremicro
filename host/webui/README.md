@@ -153,6 +153,10 @@ rather than in a help page:
 - The touch pad and rear button get a warning that **hold can never fire from real hardware**:
   firmware v2 reports them as one bare line (`touch`, `rear`) with no down/up pair, and a tap has
   no duration. Their `Test` sends a genuine `touch down` … `touch up` pair, which does fire it.
+- A joystick direction says so when **the build on the pad doesn't emit `joy` at all**: the
+  capability answer in `/api/status.firmware.events` lists what the firmware actually sends, and if
+  `joy` is not in it (it is not, on the build shipping today) every direction is inert until the pad
+  is reflashed, whatever is bound. Said once, on the first card, and `Test` still fires it.
 
 `device.hold_ms` and `device.double_ms` are editable in the same panel, with the live values quoted
 back in every note and a list of which controls are actually paying for `double_ms`.

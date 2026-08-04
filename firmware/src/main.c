@@ -1508,13 +1508,17 @@ static void handle_line(char *line)
         // back to per-pixel `k`/`u` when this is absent or reports frames=0.
         // batt=none|unknown|ok distinguishes "no battery support in this build"
         // from "support present, gauge not answering" from "reading is live".
-        out_line("ok ver 2 keys=%d under=%d frames=1 events=key%s%s%s%s batt=%s\n",
+        out_line("ok ver 2 keys=%d under=%d frames=1 events=key%s%s%s%s%s batt=%s\n",
                  KEY_N, AMB_N,
                  (LM_ENABLE_ENCODER ? ",enc" : "")
                  // Concatenating at compile time keeps this honest: the string lists
                  // exactly what the built firmware emits, not what it could emit.
                  , (LM_ENABLE_TOUCH ? ",touch" : ""),
                  (LM_ENABLE_REAR ? ",rear" : ""),
+                 // joy was missing here even though joy_task emits it, so the web UI
+                 // concluded the joystick was inert and said so. A capability string that
+                 // under-reports is worse than none: it makes working hardware look broken.
+                 (LM_ENABLE_JOYSTICK ? ",joy" : ""),
 #if LM_ENABLE_BATTERY
                  ",batt",
 #else

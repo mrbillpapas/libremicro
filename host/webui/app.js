@@ -559,7 +559,7 @@ const state = {
   builtins: BUILTIN_PALETTES,
   daemonReachable: null,
   bootDone: false,
-  status: { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false, input_events: null, keys: null },
+  status: { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false, input_events: null, keys: null, firmware: null },
   loadedFromDaemon: false,
   dirty: false,
   profile: null,                 // profile name being edited
@@ -2466,39 +2466,54 @@ function renderControlPicker() {
     place(box, cap.cells[0].row, gc0, Math.max(...cols) - gc0 + 1);
   }
 
-  // The non-key controls, in the very slots the board draws them in. All three are bindable; none
-  // of them is an LED, which is why they are ghosts on the board and ordinary cells here.
-  for (const f of g.featureCells) {
-    if (f.kind === 'joystick') {
+  /* One cell per non-key control, keyed by kind so the same description serves whether the
+   * geometry gave it a grid slot or not. All three are bindable; none of them is an LED, which is
+   * why they are ghosts on the board and ordinary cells here. */
+  const featCell = (kind, label, nr, nc) => {
+    if (kind === 'joystick') {
       const dir = joyDefaultDir();
-      place(cell('joystick', dir, {
-        nr: f.row, nc: f.gcol, cls: 'featcell joy', glyph: pickerGlyph(f.kind),
-        top: f.label, count: joyTotalBindings(),
+      return cell('joystick', dir, {
+        nr, nc, cls: 'featcell joy', glyph: pickerGlyph(kind),
+        top: label, count: joyTotalBindings(),
         sub: state.bind.control === 'joystick' ? JOY_LABEL[JOY_DIRS[dir]] : '8 directions',
         title: 'joystick — eight directions, each bound on its own',
         aria: 'joystick, eight directions each bound on its own',
-      }), f.row, f.gcol);
-      continue;
+      });
     }
-    place(cell(f.kind, 0, {
-      nr: f.row, nc: f.gcol, cls: 'featcell', glyph: pickerGlyph(f.kind),
-      top: f.label, sub: f.kind === 'encoder' ? 'cw / ccw / press' : 'profile-level',
-      title: f.kind === 'encoder' ? 'encoder — rotation and its button' : 'capacitive touch pad',
-    }), f.row, f.gcol);
-  }
+    return cell(kind, 0, {
+      nr, nc, cls: 'featcell', glyph: pickerGlyph(kind),
+      top: label, sub: kind === 'encoder' ? 'cw / ccw / press' : 'profile-level',
+      title: kind === 'encoder' ? 'encoder — rotation and its button' : 'capacitive touch pad',
+    });
+  };
+  for (const f of g.featureCells) place(featCell(f.kind, f.label, f.row, f.gcol), f.row, f.gcol);
   wrap.append(map);
 
   /* The rear button is on the BACK of the device. There is no slot for it on the front grid and
    * dropping it into a spare one would be a lie about the hardware, so it lives just outside the
    * grid, on the other side of a dashed line, saying where it is. */
   const off = el('div', { class: 'ctloff' });
+  let offCol = 0;
   off.append(cell('rear', 0, {
-    nr: g.nRows, nc: 0, cls: 'featcell rear', glyph: rearGlyph(),
+    nr: g.nRows, nc: offCol++, cls: 'featcell rear', glyph: rearGlyph(),
     top: 'rear button', sub: 'profile-level',
     title: 'rear button — on the back of the device, not on the front grid',
     aria: 'rear button, on the back of the device, off the front grid',
   }));
   off.append(el('span', { class: 'ctloff-t', text: 'on the back — no position on the front grid' }));
+
+  /* A `layout.key_rows` the faceplate doesn't have can leave a non-key control with no slot — its
+   * grid position is a key's in that layout, so buildGeometry() drops the ghost and the board
+   * doesn't draw it. It is still bindable, so it joins the off-grid strip rather than becoming
+   * unreachable: every bindable control must be selectable from here. */
+  const drawn = new Set(g.featureCells.map((f) => f.kind));
+  const missing = FEATURES.filter((f) => !drawn.has(f.kind));
+  for (const f of missing) off.append(featCell(f.kind, f.label, g.nRows, offCol++));
+  if (missing.length) {
+    off.append(el('span', { class: 'ctloff-t', text:
+      `layout.key_rows leaves no grid slot for the ${missing.map((f) => f.label).join(' or ')} in `
+      + 'this layout, so it is listed here instead' }));
+  }
   wrap.append(off);
 
   // The stick's eight sectors, as a compass: a direction IS a position, so picking one is the same
@@ -2882,6 +2897,18 @@ function triggerNotes(control, index, kind) {
     return out;
   }
 
+  /* The pad answers a capability query with the event kinds its build actually emits. A firmware
+   * that doesn't list `joy` will never send one, so a joystick binding on that build is inert until
+   * it is reflashed — said once, on the first card, rather than on all four. */
+  if (control === 'joystick' && kind === 'press') {
+    const evs = state.status?.firmware?.events;
+    if (Array.isArray(evs) && evs.length && !evs.includes('joy')) {
+      note(`The firmware on the pad reports ${evs.join(', ')} — not joy — so no joystick event `
+        + 'reaches the daemon from hardware on this build, whatever is bound to any direction. '
+        + 'Test below injects one, which does fire it.', 'warn');
+    }
+  }
+
   const tapOnly = control === 'touch' || control === 'rear';
   if (kind === 'press') {
     if (bound.has('double')) {
@@ -2925,6 +2952,7 @@ function renderTimingBox() {
     const scan = (owner, where) => {
       for (const k of owner?.keys || []) if (k?.on?.double) payers.push(`${where}key ${k.index}`);
       for (const c of ['touch', 'rear']) if (owner?.[c]?.double) payers.push(`${where}${c}`);
+      for (const d of JOY_DIRS) if (owner?.joystick?.[d]?.double) payers.push(`${where}joystick ${d}`);
     };
     scan(p, state.config.profiles && Object.keys(state.config.profiles).length > 1 ? `${pname}: ` : '');
     for (const [mname, m] of Object.entries(p?.modes || {})) scan(m, `${pname}/${mname}: `);
@@ -3897,10 +3925,13 @@ async function refreshStatus() {
       previewing: !!d.previewing,
       input_events: d.input_events ?? null,
       keys: d.keys ?? null,
+      // The capability answer from the pad. Its `events` list is which event kinds this build
+      // actually emits, which is how the joystick cards can say a binding is inert on this build.
+      firmware: d.firmware ?? null,
     };
     if (state.inputSeen === null && typeof d.input_events === 'boolean') state.inputSeen = d.input_events;
   } else if (!res.reachable) {
-    state.status = { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false, input_events: null, keys: null };
+    state.status = { connected: false, port: null, active_profile: null, active_mode: null, battery: null, previewing: false, input_events: null, keys: null, firmware: null };
   }
   renderTop();
   renderCapsBox();
