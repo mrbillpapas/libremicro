@@ -29,10 +29,17 @@ UI. The goal is a full open-source alternative to Work Louder's Input software. 
 - ✅ **Host daemon core** — config schema v2 with validation and v1 migration, 16 palettes,
   10 animated effects, perceptual (OKLab) colour, frame compositing and streaming,
   export/import, and a local HTTP API. 56 tests, no device required.
-- 🚧 v2 "thin-transport" firmware that emits input events over serial — pending touch/encoder
-  pin re-verification. **This is the critical path**: every behavioural feature waits on it.
-- 🚧 Local web UI (layout view, palette/effect designer, live preview, export/import).
-- 📋 Bindings — launcher, keyboard shortcuts, script triggers, modes (blocked on the above).
+- ✅ **Local web UI** — layout-accurate device view, palette and effect designer with live
+  on-device preview, identify sweep, export/import.
+- ✅ **LED index mapping confirmed** on hardware (a serpentine starting bottom-right), shipped
+  as a default so spatial effects are correct out of the box.
+- ✅ **Bindings** — app launch, keyboard chords, typed text, shell/script/AppleScript with
+  trigger context, built-in actions, press/release/hold/double, modes with encoder rebinding,
+  and profiles.
+- 🟡 **Firmware v2** (input events + batched frame writes) — written and compiling, **not yet
+  flashed**. Until it is, bindings fire from injected events (`POST /api/simulate`) rather than
+  real presses. **This is the critical path.**
+- 📋 Notification watchers, agent control surface.
 - 📋 Power on/off, staged idle sleep + battery reporting, BLE HID standalone mode.
 
 Phased plan with acceptance criteria: [docs/ROADMAP.md](docs/ROADMAP.md).

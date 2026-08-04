@@ -4,20 +4,23 @@ Sequenced delivery plan for the scope in [`VISION.md`](../VISION.md). Phases are
 each one ends with something demonstrable, and so the hardware-blocked work sits behind work that
 isn't blocked.
 
+## Start here
+
+**The one thing blocking everything: flash firmware v2.** It's written and compiles; a human
+needs to flash it and check the key orientation. Until then every binding is exercised through
+`POST /api/simulate` rather than by touching the pad. See Phase 2 for the verification order and
+the boot-loop caveat.
+
 ## Where we actually are
 
-The LED-out half of the system **works today**: the current firmware drives 13 per-key LEDs,
-8 underglow LEDs, and 3 PWM status LEDs over a newline-delimited serial protocol, and
-`host/cli/lmctl.py` can already talk to it.
+The LED-out half **works on hardware**: custom firmware is flashed and driving 13 per-key LEDs,
+8 underglow LEDs and 3 PWM status LEDs, with the strip-index mapping confirmed by identify
+sweep. The lighting engine, config layer, web UI and full binding dispatch are all built.
 
-Nothing reads *input* from the pad yet. Every behavioural use case — launcher, shortcuts,
-scripts, modes, notifications, agent control — needs key presses and encoder turns to reach the
-host, so all of them sit behind one firmware change (Phase 2), which itself sits behind
-re-verifying three provisional pins.
-
-That's why Phases 0 and 1 are lighting and tooling: they're **fully unblocked**, they exercise
-the config and effect engine that everything later depends on, and they produce a pad that
-visibly does something new.
+What the pad still can't do is tell the host that you pressed something. Firmware v2 fixes that
+and is written, but not yet flashed — so bindings currently fire from injected events rather
+than real presses. Everything downstream of a keypress (notifications, agent control) is being
+built against that same injected path, which means it will work the moment v2 lands.
 
 ## Phase 0 — Foundations ✅ **built**
 
@@ -53,7 +56,18 @@ The first thing a user can actually *use*, and it needs no firmware change.
 **Done when:** someone can open a local URL, design a lighting setup by clicking, watch it apply
 to the device in real time, export it, and re-import it on a fresh machine.
 
-## Phase 2 — Input events: firmware v2 (the critical path)
+## Phase 2 — Input events: firmware v2 🟡 **written, not flashed**
+
+The code exists and compiles clean (`firmware/src/main.c`): key matrix scanning, `key <i>
+down`/`up` events carrying **logical** indices, and the batched `kf`/`uf` frame commands.
+Encoder, touch pad and rear button are behind `LM_ENABLE_UNVERIFIED_INPUTS`, off by default,
+until their pins are confirmed.
+
+**What's left is a human flashing it**, then verifying in this order: LEDs still light; each
+key gives exactly one `down` and one `up`; and the orientation — top-left should report
+`key 0` and bottom-right `key 12`. If it's transposed, the fix is one lookup table
+(`MTX_TO_LOGICAL`). Keep [`RECOVERY.md`](RECOVERY.md) open: `firmware/README.md` records a
+boot-loop on an earlier revision, so step one is a real risk rather than a formality.
 
 **This is the gate.** Two steps, in order:
 
@@ -69,9 +83,13 @@ to the device in real time, export it, and re-import it on a fresh machine.
 matrix scanning and no missed encoder detents during fast rotation, while LED commands continue to
 work on the same connection.
 
-## Phase 3 — Bindings: launcher, shortcuts, scripts
+## Phase 3 — Bindings: launcher, shortcuts, scripts ✅ **built**
 
 Use case 1, plus the two binding types added to the vision.
+Lives in `events.py` (trigger recognition), `actions.py` (execution) and `dispatch.py`
+(resolution). Verified end-to-end against the live daemon via `POST /api/simulate`, which
+injects an event as though the pad had sent it — necessary because Phase 2 isn't flashed, and
+useful permanently for testing and demos.
 
 - **Launch** bindings (`open -a`, profile-specific `open -na … --args`).
 - **Keyboard shortcut** synthesis: chords, media keys, and text insertion.
@@ -82,13 +100,17 @@ Use case 1, plus the two binding types added to the vision.
 **Done when:** pressing a key launches its app, fires its chord in a real application, or runs its
 script with correct context — and a slow script cannot stall the pad.
 
-## Phase 4 — Modes and the encoder
+## Phase 4 — Modes and the encoder ✅ **built**
 
 Use case 2. Mode key press → confirmation flash → encoder rebinds; media mode drives volume,
 desk mode drives desk height. Optional whole-pad recolour per mode.
 
 **Done when:** the same dial does different jobs depending on the active mode, the active mode is
-visible on the LEDs, and mode state survives a daemon restart.
+visible on the LEDs, and mode state survives a daemon restart. ✅
+
+Two behaviours worth knowing, both decided while building: a mode key **toggles** (pressing it
+again leaves the mode, so a disabled timeout can't strand you), and encoder activity **extends**
+a timed mode rather than letting it expire mid-adjustment.
 
 ## Phase 5 — Web UI v2: bindings, profiles, battery
 

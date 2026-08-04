@@ -56,6 +56,14 @@
         "fps": {
           "description": "Frame rate for animated effects. The link is ASCII over USB serial, so keep this modest.",
           "type": "number", "minimum": 1, "maximum": 60, "default": 30
+        },
+        "hold_ms": {
+          "description": "How long a control must be held before its 'hold' binding fires. A hold that fires suppresses the 'press' that release would otherwise produce.",
+          "type": "integer", "minimum": 50, "maximum": 5000, "default": 450
+        },
+        "double_ms": {
+          "description": "Double-tap window. Note the cost: a control with a 'double' binding cannot fire 'press' until this window has elapsed, so binding 'double' makes that key feel less immediate. Keys with no 'double' binding fire 'press' instantly regardless of this value.",
+          "type": "integer", "minimum": 50, "maximum": 2000, "default": 280
         }
       }
     },

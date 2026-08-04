@@ -41,7 +41,7 @@ populated slots) for config and translates at the edges; see `host/daemon/librem
 index, or the daemon has to know the matrix's unpopulated slots to interpret them. Firmware
 should do that mapping once, on-device.
 
-### Planned: batched frame writes
+### Batched frame writes — implemented in v2 firmware
 
 At 115200 baud the link carries roughly 11.5 KB/s. A full 21-pixel frame written as
 individual commands is ~210 bytes, so 30 fps costs over half the link before acks, and it
@@ -60,10 +60,16 @@ Two commands would remove the problem and are worth adding alongside the v2 inpu
 
 That's 92 bytes for a whole frame instead of ~210, with two refreshes instead of 21.
 
-## Device → host: input events (planned, v2)
+Both are implemented in v2. A line is applied only if **every** colour on it parses, so a
+malformed frame leaves the pad untouched. The host still uses per-pixel writes with frame
+diffing; `ver` reports whether the connected firmware supports batching, so the host can detect
+it rather than guess.
 
-The v2 "thin-transport" firmware will emit one line per input event on the same link, so the
-host daemon can react. Proposed grammar (subject to change once implemented):
+## Device → host: input events
+
+Implemented in v2 firmware. One line per input event on the same link, so the host daemon can
+react. Key events are live in the default build; the encoder, touch pad and rear button are
+behind `LM_ENABLE_UNVERIFIED_INPUTS` (off by default) until their pins are confirmed.
 
 | Event | Meaning |
 |---|---|
