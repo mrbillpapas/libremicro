@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>LibreMicro — Lighting Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skiplink" href="#panels">Skip to editor</a>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <strong>LibreMicro</strong>
+    <span class="sub">Lighting Studio</span>
+  </div>
+
+  <div class="statusbar" id="statusbar">
+    <span class="stat" id="stat-conn" title="Daemon / device link">
+      <i class="dot" data-state="unknown" aria-hidden="true"></i>
+      <span class="v">connecting…</span>
+    </span>
+    <span class="stat">port <span class="v" id="stat-port">—</span></span>
+    <span class="stat">profile <span class="v" id="stat-profile">—</span></span>
+    <span class="stat">mode <span class="v" id="stat-mode">—</span></span>
+    <span class="stat">battery <span class="v" id="stat-batt">—</span></span>
+  </div>
+
+  <div class="topactions">
+    <span class="dirtyflag" id="dirty-flag" hidden>unsaved</span>
+    <button id="btn-reload" type="button" class="ghost">Reload</button>
+    <button id="btn-save" type="button" class="primary">Save</button>
+  </div>
+</header>
+
+<!-- Reserved slot: the unverified-layout warning renders here, never above the header,
+     so showing it cannot push the device view around mid-session. -->
+<div id="banner-slot" class="banner-slot"></div>
+
+<main>
+  <section class="stage" aria-labelledby="stage-h">
+    <div class="stage-head">
+      <h2 id="stage-h">Device</h2>
+      <label class="field inline">
+        <span>Profile</span>
+        <select id="sel-profile"></select>
+      </label>
+      <button id="btn-make-active" type="button" class="ghost small" title="Set this profile as active_profile in the config">Make active</button>
+    </div>
+
+    <div class="deviceview">
+      <svg id="device" viewBox="0 0 400 386" role="group" aria-label="Creator Micro 2 LED layout">
+        <!-- built by app.js from layout.key_rows and the index mappings -->
+      </svg>
+    </div>
+
+    <div class="stage-controls">
+      <label class="chk"><input type="checkbox" id="chk-indices" checked> Strip indices</label>
+      <label class="chk"><input type="checkbox" id="chk-labels"> Key labels</label>
+      <label class="chk"><input type="checkbox" id="chk-anim" checked> Animate preview</label>
+      <label class="field inline" title="Which columns the 2-key and 3-key rows occupy is unverified — this is a view preference only, it is not written to the config">
+        <span>Short rows</span>
+        <select id="sel-align">
+          <option value="center">centred (provisional)</option>
+          <option value="left">left</option>
+          <option value="right">right</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <label class="chk"><input type="checkbox" id="chk-live"> Live preview on device</label>
+      <button id="btn-stop-preview" type="button" class="ghost small">Stop preview</button>
+    </div>
+
+    <p class="stage-note" id="stage-note"></p>
+  </section>
+
+  <section class="panels" id="panels" aria-label="Editor">
+    <div class="tabs" role="tablist" aria-label="Editor sections">
+      <button role="tab" id="tab-color"    aria-controls="panel-color"    aria-selected="true"  class="tab">Colour</button>
+      <button role="tab" id="tab-palette"  aria-controls="panel-palette"  aria-selected="false" class="tab" tabindex="-1">Palettes</button>
+      <button role="tab" id="tab-effect"   aria-controls="panel-effect"   aria-selected="false" class="tab" tabindex="-1">Effect</button>
+      <button role="tab" id="tab-identify" aria-controls="panel-identify" aria-selected="false" class="tab" tabindex="-1">Identify</button>
+      <button role="tab" id="tab-config"   aria-controls="panel-config"   aria-selected="false" class="tab" tabindex="-1">Config</button>
+    </div>
+
+    <!-- ---------------------------------------------------------------- Colour -->
+    <div class="panel" id="panel-color" role="tabpanel" aria-labelledby="tab-color" tabindex="0">
+      <h3 class="phead">Selected LED <span class="pill" id="sel-name">none</span></h3>
+      <p class="hint" id="sel-hint">Click an LED in the device view, or tab into it and press Enter.</p>
+
+      <div id="ce-led" class="ce-slot"></div>
+
+      <div class="row" id="key-extra">
+        <button id="btn-apply-all-keys" type="button" class="ghost small">Apply colour to all keys</button>
+        <button id="btn-spread-palette" type="button" class="ghost small">Spread palette across keys</button>
+        <button id="btn-clear-key" type="button" class="ghost small">Clear this key's colour</button>
+      </div>
+
+      <div id="status-led-box" class="subbox" hidden>
+        <h4>Status LED duty</h4>
+        <p class="hint">Three single-colour LEDs on GPIO 35 / 45 / 48 — 8-bit PWM duty, not RGB.</p>
+        <div id="status-sliders" class="stack"></div>
+      </div>
+
+      <hr>
+
+      <h3 class="phead">Base layer</h3>
+      <div class="subbox">
+        <h4>Underglow base colour</h4>
+        <p class="hint">
+          The config has <em>one</em> underglow colour for all 8 LEDs
+          (<code>lighting.underglow</code>). Per-LED underglow colour comes from an effect.
+        </p>
+        <div id="ce-underglow" class="ce-slot"></div>
+        <button id="btn-clear-underglow" type="button" class="ghost small">Clear underglow base</button>
+      </div>
+
+      <div class="subbox">
+        <h4>Device</h4>
+        <div class="grid2">
+          <label class="field"><span>Brightness <output id="out-bright"></output></span>
+            <input type="range" id="rng-bright" min="0" max="255" step="1"></label>
+          <label class="field"><span>Frame rate <output id="out-fps"></output></span>
+            <input type="range" id="rng-fps" min="1" max="60" step="1"></label>
+        </div>
+        <p class="hint">Frame rate also caps how often this page pushes live-preview frames.</p>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------------- Palettes -->
+    <div class="panel" id="panel-palette" role="tabpanel" aria-labelledby="tab-palette" tabindex="0" hidden>
+      <h3 class="phead">Palettes</h3>
+      <div class="row">
+        <label class="field inline grow"><span>Palette</span><select id="sel-palette"></select></label>
+        <button id="btn-pal-new" type="button" class="ghost small">New</button>
+        <button id="btn-pal-dup" type="button" class="ghost small">Duplicate</button>
+        <button id="btn-pal-del" type="button" class="ghost small danger">Delete</button>
+      </div>
+      <p class="hint" id="pal-origin"></p>
+
+      <div class="gradwrap">
+        <div class="gradbar" id="gradbar" tabindex="-1">
+          <div class="gradfill" id="gradfill"></div>
+          <div class="handles" id="pal-handles"></div>
+        </div>
+        <div class="gradaxis"><span>0.0</span><span>0.5</span><span>1.0</span></div>
+      </div>
+
+      <div class="row">
+        <label class="field inline grow"><span>Name</span><input type="text" id="pal-name" spellcheck="false" autocomplete="off"></label>
+        <label class="chk"><input type="checkbox" id="pal-cyclic"> Cyclic</label>
+      </div>
+
+      <div class="row">
+        <button id="btn-stop-add" type="button" class="ghost small">Add stop</button>
+        <button id="btn-stop-del" type="button" class="ghost small">Delete stop</button>
+        <button id="btn-stop-even" type="button" class="ghost small">Distribute evenly</button>
+        <span class="spacer"></span>
+        <button id="btn-pal-use" type="button" class="ghost small">Use in effect</button>
+      </div>
+
+      <h4>Stop <span class="pill" id="stop-name">—</span></h4>
+      <label class="field"><span>Position <output id="out-stoppos"></output></span>
+        <input type="range" id="rng-stoppos" min="0" max="1" step="0.001"></label>
+      <div id="ce-stop" class="ce-slot"></div>
+
+      <p class="hint">
+        Interpolation between stops is done in OKLCh, so gradients keep their chroma instead of
+        dipping through grey. The stored format is the schema's <code>palettes</code> map —
+        <code>{pos, color}</code> stops plus <code>cyclic</code> — which is WLED-compatible in spirit.
+      </p>
+    </div>
+
+    <!-- ---------------------------------------------------------------- Effect -->
+    <div class="panel" id="panel-effect" role="tabpanel" aria-labelledby="tab-effect" tabindex="0" hidden>
+      <h3 class="phead">Effect <span class="pill" id="eff-scope"></span></h3>
+      <p class="hint">Written to <code>profiles.&lt;profile&gt;.lighting.effect</code>. Previewed here client-side, so it works with no device attached.</p>
+
+      <div class="grid2">
+        <label class="field"><span>Name</span><select id="eff-name"></select></label>
+        <label class="field"><span>Palette</span><select id="eff-palette"></select></label>
+        <label class="field"><span>Speed <output id="out-speed"></output></span>
+          <input type="range" id="eff-speed" min="0" max="10" step="0.05"></label>
+        <label class="field"><span>Intensity <output id="out-intensity"></output></span>
+          <input type="range" id="eff-intensity" min="0" max="1" step="0.01"></label>
+        <label class="field"><span>Direction</span><select id="eff-direction"></select></label>
+        <label class="field"><span>Target</span><select id="eff-target"></select></label>
+        <label class="field"><span>Blend over base</span><select id="eff-blend"></select></label>
+        <label class="field"><span>&nbsp;</span>
+          <span class="chk boxed"><input type="checkbox" id="eff-reverse"> Reverse</span></label>
+      </div>
+
+      <div class="row">
+        <button id="btn-eff-send" type="button" class="ghost small">Send to device</button>
+        <button id="btn-eff-remove" type="button" class="ghost small danger">Remove effect</button>
+      </div>
+
+      <p class="hint" id="eff-note"></p>
+    </div>
+
+    <!-- -------------------------------------------------------------- Identify -->
+    <div class="panel" id="panel-identify" role="tabpanel" aria-labelledby="tab-identify" tabindex="0" hidden>
+      <h3 class="phead">Identify sweep</h3>
+      <p class="hint">
+        Lights one LED at a time on the physical pad. When you see which LED lit, click that
+        position in the device view to record it. This is what turns the provisional
+        index&nbsp;→&nbsp;position guesses into confirmed <code>layout.key_positions</code> /
+        <code>layout.underglow_positions</code>.
+      </p>
+      <p class="hint">
+        Recorded key positions are <em>[row, col]</em> where <code>col</code> is the ordinal within
+        that physical row, left to right — not the scan-matrix column. Which matrix columns the
+        2-key and 3-key rows populate is a separate unverified question (see
+        <code>docs/HARDWARE.md</code>), so this UI deliberately does not assert one.
+        Underglow positions are <em>[x, y]</em> in the 3×3 grid, 0–2 each, centre excluded.
+      </p>
+
+      <div class="row">
+        <fieldset class="seg">
+          <legend class="sr">Target strip</legend>
+          <label class="chk"><input type="radio" name="id-target" value="keys" checked> Per-key (GPIO 7, 0–12)</label>
+          <label class="chk"><input type="radio" name="id-target" value="underglow"> Underglow (GPIO 6, 0–7)</label>
+        </fieldset>
+      </div>
+
+      <div class="row idrow">
+        <button id="btn-id-start" type="button" class="primary small">Start sweep</button>
+        <button id="btn-id-prev" type="button" class="ghost small">◀ Prev</button>
+        <span class="pill big" id="id-current">idle</span>
+        <button id="btn-id-next" type="button" class="ghost small">Next ▶</button>
+        <button id="btn-id-skip" type="button" class="ghost small">Skip</button>
+      </div>
+
+      <div id="id-table-wrap" class="tablewrap">
+        <table class="idtable">
+          <caption class="sr">Recorded strip index to physical position mapping</caption>
+          <thead><tr><th>Index</th><th>Position</th><th></th></tr></thead>
+          <tbody id="id-table"></tbody>
+        </table>
+      </div>
+
+      <div class="row">
+        <button id="btn-id-provisional" type="button" class="ghost small">Fill with provisional</button>
+        <button id="btn-id-clear" type="button" class="ghost small">Clear all</button>
+      </div>
+
+      <label class="chk"><input type="checkbox" id="chk-verified"> Mark mapping as verified (<code>layout.verified</code>)</label>
+      <div class="row">
+        <button id="btn-id-write" type="button" class="primary small">Write mapping to config</button>
+      </div>
+      <p class="hint" id="id-note"></p>
+    </div>
+
+    <!-- ---------------------------------------------------------------- Config -->
+    <div class="panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
+      <h3 class="phead">Config</h3>
+      <div class="row">
+        <button id="btn-export" type="button" class="ghost small">Export JSON…</button>
+        <button id="btn-import" type="button" class="ghost small">Import JSON…</button>
+        <span class="spacer"></span>
+        <button id="btn-json-apply" type="button" class="ghost small">Apply edits below</button>
+      </div>
+      <p class="hint">
+        Export asks the daemon for <code>/api/export</code> and falls back to the config held in
+        this page when the daemon is unreachable. Import posts to <code>/api/import</code>, and
+        loads into the editor either way.
+      </p>
+      <ul class="errs" id="cfg-errors" hidden></ul>
+      <label class="field"><span>Live config (editable)</span>
+        <textarea id="json-view" spellcheck="false" autocomplete="off" rows="22"></textarea></label>
+    </div>
+  </section>
+</main>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+<input type="file" id="file-import" accept=".json,application/json" hidden>
+
+<noscript><p class="noscript">This editor needs JavaScript. The config is plain JSON — see <code>host/config/</code>.</p></noscript>
+<script type="module" src="app.js"></script>
+</body>
+</html>

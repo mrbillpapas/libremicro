@@ -14,8 +14,10 @@ addressable per-key RGB.
 The vendor firmware exposes only two whole-zone colours over its RPC. The CM2's hardware
 actually has **13 individually addressable per-key LEDs + 8 underglow LEDs** — the vendor
 just keeps per-pixel control internal. LibreMicro unlocks it, and adds a host-side layer so
-the pad can launch apps, switch modes, mirror notifications, and drive an agent-coding
-workflow. See [docs/VISION.md](docs/VISION.md).
+the pad can launch apps, fire keyboard shortcuts, run scripts, switch modes, mirror
+notifications, and drive an agent-coding workflow — configured as JSON or through a local web
+UI. The goal is a full open-source alternative to Work Louder's Input software. See
+[VISION.md](VISION.md) for the product and [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
 ## Status
 
@@ -24,9 +26,16 @@ workflow. See [docs/VISION.md](docs/VISION.md).
   see [docs/HARDWARE.md](docs/HARDWARE.md)).
 - ✅ Three PWM status/"touch" LEDs controllable.
 - ✅ Key-matrix pin map fully reverse-engineered and verified.
-- 🚧 Host daemon (launcher / modes / notifications) — designed, not yet built.
+- ✅ **Host daemon core** — config schema v2 with validation and v1 migration, 16 palettes,
+  10 animated effects, perceptual (OKLab) colour, frame compositing and streaming,
+  export/import, and a local HTTP API. 56 tests, no device required.
 - 🚧 v2 "thin-transport" firmware that emits input events over serial — pending touch/encoder
-  pin re-verification.
+  pin re-verification. **This is the critical path**: every behavioural feature waits on it.
+- 🚧 Local web UI (layout view, palette/effect designer, live preview, export/import).
+- 📋 Bindings — launcher, keyboard shortcuts, script triggers, modes (blocked on the above).
+- 📋 Power on/off, staged idle sleep + battery reporting, BLE HID standalone mode.
+
+Phased plan with acceptance criteria: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Layout
 
@@ -34,7 +43,8 @@ workflow. See [docs/VISION.md](docs/VISION.md).
 |---|---|
 | `firmware/` | ESP-IDF custom firmware (per-key RGB + status LEDs + serial command API) |
 | `host/cli/lmctl.py` | Low-level LED/serial CLI |
-| `host/daemon/` | (planned) launcher / modes / notifications runtime |
+| `host/daemon/` | Lighting engine, config, HTTP API — see its [README](host/daemon/README.md) |
+| `host/webui/` | Local config editor + palette designer with live LED preview |
 | `host/config/` | JSON config example + schema (the AI-native customization surface) |
 | `host/swift/` | IOKit HID tools that talk to the **stock** vendor RPC (RE + fallback) |
 | `tools/` | Xtensa disassembly / firmware-analysis toolkit used for the RE |
@@ -51,11 +61,20 @@ cd firmware && pio run
 P=$(ls /dev/cu.usbmodem*)
 esptool --port $P write-flash 0x10000 .pio/build/cm2/firmware.bin
 
-# 3. Drive the LEDs
+# 3. Drive the LEDs directly (low-level escape hatch)
 python3 ../host/cli/lmctl.py demo
 python3 ../host/cli/lmctl.py key 3 ff0000     # key 3 red
 python3 ../host/cli/lmctl.py rainbow
 ```
+
+Then run the daemon, which gives you palettes, animated effects, and the web UI:
+
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -e host/daemon
+./.venv/bin/libremicro                        # web UI on http://127.0.0.1:8777
+```
+
+It runs fine with no device attached, so you can design lighting before you flash anything.
 
 To go back to stock, see [docs/RECOVERY.md](docs/RECOVERY.md).
 
