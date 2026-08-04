@@ -32,6 +32,32 @@ except ImportError:  # pragma: no cover - surfaced at startup with a clear messa
 
 EVENT_PREFIXES = ("key", "enc", "touch", "rear", "batt")
 
+#: Above this many changed pixels in a zone, one batched `kf`/`uf` line costs fewer bytes
+#: than the individual writes it replaces — and far fewer strip refreshes, since the
+#: firmware's per-pixel path refreshes BOTH strips on every single write. The link is the
+#: binding constraint (~11.5 KB/s), so these are set from the byte crossover:
+#: a key write is ~12 bytes against 82 for a whole `kf` line, underglow ~11 against 52.
+BATCH_MIN_KEYS = 7
+BATCH_MIN_UNDER = 5
+
+
+def _parse_ver(tokens: list[str]) -> dict:
+    """Parse the firmware's `ok ver 2 keys=13 under=8 frames=1 events=key,...` reply."""
+    info: dict = {"raw": " ".join(tokens)}
+    if tokens and tokens[0].isdigit():
+        info["version"] = int(tokens[0])
+    for tok in tokens:
+        key, _, value = tok.partition("=")
+        if not value:
+            continue
+        if key == "events":
+            info[key] = [v for v in value.split(",") if v]
+        elif value.isdigit():
+            info[key] = int(value)
+        else:
+            info[key] = value
+    return info
+
 
 def find_port(explicit: str | None = None) -> str | None:
     """Resolve a configured port. 'auto' or None picks the first usbmodem device."""
@@ -71,6 +97,8 @@ class Link:
         # Whether this firmware has ever sent an input event. Lets the UI distinguish
         # "v1 firmware, LED-out only" from "v2, but you haven't pressed anything yet".
         self.saw_input_event = False
+        # Filled in from the firmware's `ver` reply. None means "not asked yet / v1".
+        self.firmware: dict | None = None
 
     # --- connection ---------------------------------------------------------
 
@@ -106,7 +134,11 @@ class Link:
         # Force a full resend: we have no idea what's on the strips after a reconnect.
         self._last = None
         self._last_brightness = None
+        self.firmware = None
         self._start_reader()
+        # Ask what this firmware can do rather than assuming. v1 answers `err unknown`,
+        # which leaves self.firmware None and keeps us on the per-pixel path.
+        self.send("ver")
         return True
 
     def close(self) -> None:
@@ -153,6 +185,9 @@ class Link:
         if not line:
             return
         head, *rest = line.split()
+        if head == "ok" and rest and rest[0] == "ver":
+            self.firmware = _parse_ver(rest[1:])
+            return
         if head in EVENT_PREFIXES:
             if head != "batt":
                 self.saw_input_event = True
@@ -233,28 +268,38 @@ class Link:
         Uniform zones collapse to a single `all` write, which is both fewer bytes and
         fewer firmware refreshes than 13 individual pixels.
         """
+        batching = bool((self.firmware or {}).get("frames"))
         l2s = self.layout.logical_to_strip
         keys_uniform = len(set(frame.keys)) == 1
         under_uniform = len(set(frame.under)) == 1
 
         if keys_uniform and (prev is None or prev.keys != frame.keys):
+            # `k all` is already one line and one refresh — nothing to improve on.
             yield f"k all {to_hex(frame.keys[0])}"
         elif not keys_uniform:
-            for logical in range(min(KEY_N, len(frame.keys))):
-                c = frame.keys[logical]
-                if prev is not None and prev.keys[logical] == c:
-                    continue
-                yield f"k {l2s[logical]} {to_hex(c)}"
+            changed = [i for i in range(min(KEY_N, len(frame.keys)))
+                       if prev is None or prev.keys[i] != frame.keys[i]]
+            if batching and len(changed) >= BATCH_MIN_KEYS:
+                # Strip-index order, concatenated: the firmware accepts one hex blob and it's
+                # the most compact spelling. Sends the whole zone, not the diff.
+                blob = "".join(to_hex(frame.keys[l2s.index(s)]) for s in range(KEY_N))
+                yield f"kf {blob}"
+            else:
+                for logical in changed:
+                    yield f"k {l2s[logical]} {to_hex(frame.keys[logical])}"
 
         s2r = self.layout.strip_to_ring
         if under_uniform and (prev is None or prev.under != frame.under):
             yield f"u all {to_hex(frame.under[0])}"
         elif not under_uniform:
-            for strip_i in range(min(UNDERGLOW_N, len(frame.under))):
-                c = frame.under[s2r[strip_i]]
-                if prev is not None and prev.under[s2r[strip_i]] == c:
-                    continue
-                yield f"u {strip_i} {to_hex(c)}"
+            changed = [s for s in range(min(UNDERGLOW_N, len(frame.under)))
+                       if prev is None or prev.under[s2r[s]] != frame.under[s2r[s]]]
+            if batching and len(changed) >= BATCH_MIN_UNDER:
+                blob = "".join(to_hex(frame.under[s2r[s]]) for s in range(UNDERGLOW_N))
+                yield f"uf {blob}"
+            else:
+                for strip_i in changed:
+                    yield f"u {strip_i} {to_hex(frame.under[s2r[strip_i]])}"
 
         for i in range(min(STATUS_N, len(frame.status))):
             duty = max(0, min(255, int(frame.status[i])))

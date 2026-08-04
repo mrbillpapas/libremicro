@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from libremicro import color, config, effects, layout, palettes  # noqa: E402
 from libremicro.frame import Frame  # noqa: E402
-from libremicro.transport import Link  # noqa: E402
+from libremicro.transport import Link, _parse_ver  # noqa: E402
 
 
 class TestColor(unittest.TestCase):
@@ -334,6 +334,88 @@ class TestFrameDiffing(unittest.TestCase):
         nxt = prev.copy()
         nxt.keys[12] = color.parse_hex("ff0000")
         self.assertEqual(list(link._frame_lines(nxt, prev)), ["k 0 ff0000"])
+
+
+class TestBatchedFrames(unittest.TestCase):
+    """`kf`/`uf` from firmware v2. The link is the binding constraint, so the host must pick
+    whichever spelling is actually cheaper rather than always batching."""
+
+    def setUp(self):
+        self.lo = layout.Layout({})
+        self.v1 = Link(port=None, layout=self.lo)                 # no ver reply
+        self.v2 = Link(port=None, layout=self.lo)
+        self.v2.firmware = {"version": 2, "frames": 1}
+
+    def _gradient(self):
+        return Frame([color.parse_hex(f"{i * 19 % 256:02x}0000") for i in range(13)],
+                     [color.parse_hex(f"00{j * 31 % 256:02x}00") for j in range(8)])
+
+    def _blank(self):
+        # Deliberately a colour the gradient never produces, so every pixel counts as
+        # changed — otherwise a coincidental match makes the "all 13" assertions wrong.
+        return Frame([color.parse_hex("ffffff")] * 13, [color.parse_hex("111111")] * 8)
+
+    def test_ver_reply_is_parsed(self):
+        info = _parse_ver("2 keys=13 under=8 frames=1 events=key,enc".split())
+        self.assertEqual(info["version"], 2)
+        self.assertEqual(info["frames"], 1)
+        self.assertEqual(info["events"], ["key", "enc"])
+
+    def test_ver_reply_without_batching(self):
+        self.assertFalse(_parse_ver("2 keys=13 frames=0".split())["frames"])
+
+    def test_v1_never_batches(self):
+        lines = list(self.v1._frame_lines(self._gradient(), self._blank()))
+        self.assertFalse(any(l.startswith(("kf", "uf")) for l in lines))
+        self.assertEqual(len([l for l in lines if l.startswith("k ")]), 13)
+
+    def test_v2_batches_a_full_pad_change(self):
+        lines = list(self.v2._frame_lines(self._gradient(), self._blank()))
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[0].startswith("kf "))
+        self.assertTrue(lines[1].startswith("uf "))
+
+    def test_batching_actually_saves_bytes(self):
+        grad, blank = self._gradient(), self._blank()
+        cost = lambda link: sum(len(l) + 1 for l in link._frame_lines(grad, blank))
+        self.assertLess(cost(self.v2), cost(self.v1) * 0.75)
+
+    def test_small_change_stays_per_pixel(self):
+        # Batching a single changed pixel would cost ~82 bytes instead of ~12.
+        prev = self._blank()
+        nxt = prev.copy()
+        nxt.keys[3] = color.parse_hex("ff0000")
+        lines = list(self.v2._frame_lines(nxt, prev))
+        self.assertFalse(any(l.startswith("kf") for l in lines), lines)
+        self.assertEqual(len(lines), 1)
+
+    def test_uniform_zone_still_uses_all(self):
+        # `k all` is one line and one refresh — batching can't beat it.
+        f = Frame([color.parse_hex("ff0000")] * 13, [color.parse_hex("0000ff")] * 8)
+        lines = list(self.v2._frame_lines(f, None))
+        self.assertIn("k all ff0000", lines)
+        self.assertIn("u all 0000ff", lines)
+
+    def test_batched_blob_is_in_strip_order(self):
+        grad = self._gradient()
+        blob = [l for l in self.v2._frame_lines(grad, self._blank())
+                if l.startswith("kf")][0].split()[1]
+        self.assertEqual(len(blob), 13 * 6)
+        logical_hex = grad.to_hex()["keys"]
+        for logical in range(13):
+            strip = self.lo.logical_to_strip[logical]
+            self.assertEqual(blob[strip * 6:(strip + 1) * 6], logical_hex[logical],
+                             f"logical {logical} landed at the wrong strip slot")
+
+    def test_underglow_blob_is_in_strip_order(self):
+        grad = self._gradient()
+        blob = [l for l in self.v2._frame_lines(grad, self._blank())
+                if l.startswith("uf")][0].split()[1]
+        self.assertEqual(len(blob), 8 * 6)
+        ring_hex = grad.to_hex()["underglow"]
+        for strip in range(8):
+            ring = self.lo.strip_to_ring[strip]
+            self.assertEqual(blob[strip * 6:(strip + 1) * 6], ring_hex[ring])
 
 
 class TestConfig(unittest.TestCase):
