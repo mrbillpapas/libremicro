@@ -1,65 +1,273 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/mrbillpapas/libremicro/host/config/schema.json",
-  "title": "LibreMicro config",
-  "description": "Declarative config for the LibreMicro host daemon: per-key launch/colour/notification bindings, modes, and encoder behaviour. Designed to be generated and edited by an AI from this schema.",
+  "title": "LibreMicro config v2",
+  "description": "Declarative config for the LibreMicro host daemon: per-trigger bindings (launch / keyboard shortcut / script / mode / built-in action), lighting palettes and effects, profiles, device layout, and power settings. Designed to be generated and edited by an AI from this schema, and to be the single source of truth the local web UI edits.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["keys"],
+  "required": ["version", "profiles"],
   "properties": {
-    "port": {
-      "description": "Serial port of the CM2, or 'auto' to pick the first /dev/cu.usbmodem*.",
-      "type": "string",
-      "default": "auto"
+    "version": {
+      "description": "Config format version. 2 is current; v1 configs are migrated automatically on load.",
+      "const": 2
     },
-    "brightness": {
-      "description": "Global brightness scale for the addressable LEDs (0-255).",
-      "type": "integer", "minimum": 0, "maximum": 255, "default": 200
-    },
-    "keys": {
-      "description": "Per-key bindings. index 0-12 maps to the 13 physical keys.",
-      "type": "array",
-      "items": { "$ref": "#/$defs/key" }
-    },
-    "modes": {
-      "description": "Named modes. Activating one flashes its key and rebinds the encoder.",
+    "device": { "$ref": "#/$defs/device" },
+    "layout": { "$ref": "#/$defs/layout" },
+    "palettes": {
+      "description": "Named colour palettes available to effects, in addition to the built-in corpus. Built-ins with the same name are overridden.",
       "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/mode" }
+      "additionalProperties": { "$ref": "#/$defs/palette" }
     },
-    "default_encoder": {
-      "description": "Encoder binding when no mode is active.",
-      "$ref": "#/$defs/encoder"
-    }
+    "profiles": {
+      "description": "Named configurations. At least one is required; the one named by active_profile is loaded at startup.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/profile" }
+    },
+    "active_profile": {
+      "description": "Name of the profile to load at startup. Defaults to 'default' if present, else the first profile.",
+      "type": "string"
+    },
+    "power": { "$ref": "#/$defs/power" },
+    "webui": { "$ref": "#/$defs/webui" }
   },
+
   "$defs": {
     "color": {
       "description": "RGB hex, 'rrggbb' (no leading #).",
       "type": "string",
       "pattern": "^[0-9a-fA-F]{6}$"
     },
+
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "description": "Serial port of the CM2, or 'auto' to pick the first /dev/cu.usbmodem*.",
+          "type": "string",
+          "default": "auto"
+        },
+        "baud": { "type": "integer", "default": 115200 },
+        "brightness": {
+          "description": "Global brightness scale for the addressable LEDs (0-255).",
+          "type": "integer", "minimum": 0, "maximum": 255, "default": 200
+        },
+        "fps": {
+          "description": "Frame rate for animated effects. The link is ASCII over USB serial, so keep this modest.",
+          "type": "number", "minimum": 1, "maximum": 60, "default": 30
+        }
+      }
+    },
+
+    "layout": {
+      "description": "Physical geometry of the LEDs. See docs/HARDWARE.md — the strip-index-to-physical-position mappings are NOT yet verified, which is why they live here as data rather than in source. Use the web UI's identify sweep to confirm them, then set verified: true.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key_rows": {
+          "description": "Number of key caps per physical row, top to bottom. The CM2 is [2,4,4,3] = 13.",
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "default": [2, 4, 4, 3]
+        },
+        "key_positions": {
+          "description": "Physical position of each per-key strip index. Element i is [row, col] for strip index i (GPIO 7, order 0->12). null means not yet determined.",
+          "type": "array",
+          "maxItems": 13,
+          "items": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0 } }
+            ]
+          }
+        },
+        "underglow_positions": {
+          "description": "Physical position of each underglow strip index in the 3x3-minus-centre grid. Element i is [x, y] for strip index i (GPIO 6, order 0->7). null means not yet determined.",
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0, "maximum": 2 } }
+            ]
+          }
+        },
+        "verified": {
+          "description": "Set true once the mappings above have been confirmed against the physical device.",
+          "type": "boolean", "default": false
+        }
+      }
+    },
+
+    "palette": {
+      "description": "A gradient defined by colour stops, compatible in spirit with WLED custom palettes. Stops are sorted by pos on load; a single stop yields a solid colour.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stops"],
+      "properties": {
+        "label": { "type": "string" },
+        "stops": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pos", "color"],
+            "properties": {
+              "pos": { "description": "Position along the gradient, 0..1.", "type": "number", "minimum": 0, "maximum": 1 },
+              "color": { "$ref": "#/$defs/color" }
+            }
+          }
+        },
+        "cyclic": {
+          "description": "If true the gradient wraps (last stop interpolates back to the first), which is what ring and rainbow effects want.",
+          "type": "boolean", "default": false
+        }
+      }
+    },
+
+    "effect": {
+      "description": "An animated lighting layer rendered on the host and streamed to the device.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "description": "Built-in effect name.",
+          "type": "string",
+          "enum": ["solid", "gradient", "rainbow", "breathe", "chase", "ripple", "sparkle", "wipe", "comet", "off"]
+        },
+        "palette": {
+          "description": "Palette name (built-in or from the palettes map) the effect samples its colours from.",
+          "type": "string"
+        },
+        "speed": {
+          "description": "Animation rate. 0 is static; 1 is one full cycle per second.",
+          "type": "number", "minimum": 0, "maximum": 10, "default": 0.3
+        },
+        "intensity": {
+          "description": "Effect-specific magnitude (spread, density, tail length) as a 0..1 fraction.",
+          "type": "number", "minimum": 0, "maximum": 1, "default": 0.5
+        },
+        "direction": {
+          "description": "Spatial direction for directional effects.",
+          "type": "string",
+          "enum": ["horizontal", "vertical", "radial", "ring"],
+          "default": "horizontal"
+        },
+        "reverse": { "type": "boolean", "default": false },
+        "target": {
+          "description": "Which LED zone this effect renders to.",
+          "type": "string",
+          "enum": ["keys", "underglow", "all"],
+          "default": "all"
+        },
+        "blend": {
+          "description": "How the effect composites over the base layer of per-key colours.",
+          "type": "string",
+          "enum": ["replace", "multiply", "screen", "overlay"],
+          "default": "replace"
+        }
+      }
+    },
+
+    "binding": {
+      "description": "What a trigger does. Exactly one action key must be present; the optional flash gives visual confirmation.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "launch": {
+          "description": "macOS application name to open (open -a).",
+          "type": "string"
+        },
+        "shortcut": {
+          "description": "Keyboard chord to synthesise, e.g. 'cmd+shift+4', 'ctrl+opt+space', 'f13'. Modifiers: cmd, ctrl, opt/alt, shift, fn.",
+          "type": "string"
+        },
+        "text": {
+          "description": "Literal text to type at the cursor.",
+          "type": "string"
+        },
+        "shell": {
+          "description": "Shell command to run. Trigger context is passed as LM_* environment variables.",
+          "type": "string"
+        },
+        "script": {
+          "description": "Path to a script file to execute. Trigger context is passed as LM_* environment variables.",
+          "type": "string"
+        },
+        "applescript": {
+          "description": "AppleScript source to run via osascript.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Name of a mode to activate.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "Profile to switch to, or 'next'/'prev' to cycle.",
+          "type": "string"
+        },
+        "action": {
+          "description": "Built-in action token the daemon implements natively.",
+          "type": "string",
+          "enum": [
+            "vol_up", "vol_down", "mute", "play_pause", "next_track", "prev_track",
+            "bright_up", "bright_down",
+            "desk_up", "desk_down", "stand_sit",
+            "sleep", "lock", "profile_next", "profile_prev", "reload_config"
+          ]
+        },
+        "flash": {
+          "description": "Briefly flash the triggering key this colour as confirmation.",
+          "$ref": "#/$defs/color"
+        }
+      },
+      "oneOf": [
+        { "required": ["launch"] },
+        { "required": ["shortcut"] },
+        { "required": ["text"] },
+        { "required": ["shell"] },
+        { "required": ["script"] },
+        { "required": ["applescript"] },
+        { "required": ["mode"] },
+        { "required": ["profile"] },
+        { "required": ["action"] }
+      ]
+    },
+
+    "triggers": {
+      "description": "Bindings for the ways a control can be actuated. Omitted kinds do nothing.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "press":   { "$ref": "#/$defs/binding" },
+        "release": { "$ref": "#/$defs/binding" },
+        "hold":    { "$ref": "#/$defs/binding" },
+        "double":  { "$ref": "#/$defs/binding" }
+      }
+    },
+
     "key": {
       "type": "object",
       "additionalProperties": false,
       "required": ["index"],
       "properties": {
-        "index": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "index": {
+          "description": "Per-key LED / matrix index, 0-12.",
+          "type": "integer", "minimum": 0, "maximum": 12
+        },
         "label": { "type": "string" },
-        "color": { "$ref": "#/$defs/color" },
-        "launch": {
-          "description": "macOS app name to open with `open -a` on press.",
-          "type": "string"
+        "color": {
+          "description": "Base colour for this key's LED.",
+          "$ref": "#/$defs/color"
         },
-        "command": {
-          "description": "Shell command to run on press (alternative to launch).",
-          "type": "string"
-        },
-        "mode": {
-          "description": "If set, pressing this key activates the named mode instead of launching.",
-          "type": "string"
-        },
+        "on": { "$ref": "#/$defs/triggers" },
         "watch": { "$ref": "#/$defs/watch" }
       }
     },
+
     "watch": {
       "description": "A background watcher that pulses this key's LED on external state.",
       "type": "object",
@@ -70,27 +278,143 @@
           "description": "Watcher kind. 'slack_unread' and 'unread_badge' are examples; the daemon defines the available kinds.",
           "type": "string"
         },
-        "flash": { "$ref": "#/$defs/color" }
+        "flash": { "$ref": "#/$defs/color" },
+        "interval_s": { "type": "number", "minimum": 1, "default": 15 }
       }
     },
-    "mode": {
+
+    "encoder": {
+      "description": "Rotary encoder bindings. cw/ccw fire per detent.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["activate_key", "encoder"],
+      "properties": {
+        "cw":    { "$ref": "#/$defs/binding" },
+        "ccw":   { "$ref": "#/$defs/binding" },
+        "press": { "$ref": "#/$defs/binding" }
+      }
+    },
+
+    "mode": {
+      "description": "A named mode. Activating it flashes its key, rebinds the encoder, and optionally recolours the pad.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoder"],
       "properties": {
         "activate_key": { "type": "integer", "minimum": 0, "maximum": 12 },
         "flash": { "$ref": "#/$defs/color" },
-        "encoder": { "$ref": "#/$defs/encoder" }
+        "encoder": { "$ref": "#/$defs/encoder" },
+        "keys": {
+          "description": "Per-key overrides that apply only while this mode is active.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/key" }
+        },
+        "lighting": { "$ref": "#/$defs/lighting" },
+        "timeout_s": {
+          "description": "Revert to the default encoder binding after this long with no encoder activity. Omit to stay until switched.",
+          "type": "number", "minimum": 1
+        }
       }
     },
-    "encoder": {
-      "description": "Encoder actions. Values are action tokens the daemon knows (e.g. vol_up, vol_down, play_pause, desk_up, desk_down, stand_sit, or a shell: prefix).",
+
+    "lighting": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cw": { "type": "string" },
-        "ccw": { "type": "string" },
-        "press": { "type": "string" }
+        "underglow": {
+          "description": "Base colour applied to all underglow LEDs before any effect.",
+          "$ref": "#/$defs/color"
+        },
+        "status_leds": {
+          "description": "PWM duty (0-255) for the three single-colour status LEDs.",
+          "type": "array", "maxItems": 3,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "effect": { "$ref": "#/$defs/effect" }
+      }
+    },
+
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "auto_activate_app": {
+          "description": "Switch to this profile automatically when this application becomes frontmost.",
+          "type": "string"
+        },
+        "keys": {
+          "description": "Per-key bindings. index 0-12 maps to the 13 physical keys.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/key" }
+        },
+        "encoder": {
+          "description": "Encoder binding when no mode is active.",
+          "$ref": "#/$defs/encoder"
+        },
+        "touch": { "$ref": "#/$defs/triggers" },
+        "rear":  { "$ref": "#/$defs/triggers" },
+        "modes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/mode" }
+        },
+        "lighting": { "$ref": "#/$defs/lighting" }
+      }
+    },
+
+    "power": {
+      "description": "Idle and power behaviour. Enforced on-device so it still works with no host attached; these values are pushed to the firmware.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "idle_dim_after_s": {
+          "description": "Dim the LEDs after this long with no input. 0 disables.",
+          "type": "number", "minimum": 0, "default": 120
+        },
+        "dim_brightness": {
+          "type": "integer", "minimum": 0, "maximum": 255, "default": 40
+        },
+        "idle_off_after_s": {
+          "description": "Turn the LEDs off entirely after this long with no input. 0 disables.",
+          "type": "number", "minimum": 0, "default": 600
+        },
+        "deep_sleep_after_s": {
+          "description": "Deep-sleep the device after this long with no input. Any input wakes it. 0 disables.",
+          "type": "number", "minimum": 0, "default": 1800
+        },
+        "on_battery": {
+          "description": "Overrides applied when running on battery rather than USB power.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_dim_after_s":   { "type": "number", "minimum": 0 },
+            "dim_brightness":     { "type": "integer", "minimum": 0, "maximum": 255 },
+            "idle_off_after_s":   { "type": "number", "minimum": 0 },
+            "deep_sleep_after_s": { "type": "number", "minimum": 0 },
+            "brightness":         { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        },
+        "power_button": {
+          "description": "Which control long-presses to power the device off. Pending the rear-button / ext0-wake pin conflict noted in docs/HARDWARE.md.",
+          "type": "string",
+          "enum": ["rear", "encoder", "none"],
+          "default": "rear"
+        },
+        "power_off_hold_ms": {
+          "type": "integer", "minimum": 200, "default": 2000
+        }
+      }
+    },
+
+    "webui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "host": {
+          "description": "Bind address. Keep this on loopback unless you have a specific reason not to.",
+          "type": "string", "default": "127.0.0.1"
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 8777 }
       }
     }
   }
