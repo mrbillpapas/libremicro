@@ -12,6 +12,11 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=n
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
+# 1 kHz tick, for the v2 key-matrix scan task. The default 100 Hz tick makes the
+# smallest possible vTaskDelay 10 ms, which would put the whole debounce budget in a
+# single tick and turn a 2 ms scan period into a busy-loop (pdMS_TO_TICKS(2) == 0).
+CONFIG_FREERTOS_HZ=1000
+
 # CRITICAL: keep octal PSRAM OFF. On the N16R8, octal PSRAM claims GPIO33-37 for
 # SPIIO4-7/DQS. GPIO36/37 are the top-board LED power-rail enables (36 = the
 # addressable-LED VDD gate), so with PSRAM mapped to those pads the LEDs can
