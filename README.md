@@ -62,7 +62,8 @@ UI. The goal is a full open-source alternative to Work Louder's Input software. 
 - 📋 Idle sleep, power-off, BLE HID standalone mode.
 
 Phased plan and the calibration constants that had to be measured on hardware:
-[docs/ROADMAP.md](docs/ROADMAP.md).
+[docs/ROADMAP.md](docs/ROADMAP.md). Where to pick up, and the gotchas worth knowing
+before you touch anything: [docs/PLAN.md](docs/PLAN.md).
 
 ## The web UI
 

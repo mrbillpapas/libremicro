@@ -4,6 +4,10 @@ Sequenced delivery plan for the scope in [`VISION.md`](../VISION.md). Phases are
 each one ends with something demonstrable, and so the hardware-blocked work sits behind work that
 isn't blocked.
 
+> **Continuing this work?** [`PLAN.md`](PLAN.md) is the handoff: open items in priority
+> order, the operational traps that cost real debugging time, the calibration constants
+> that could only be measured on hardware, and decisions still open.
+
 ## Where we actually are
 
 **The pad works.** Custom firmware v2 is flashed and running on hardware. Keys, the rotary
