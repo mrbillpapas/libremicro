@@ -7,7 +7,9 @@ produce — are tested deterministically rather than with sleeps.
 Actions are stubbed. What's under test is *which* binding gets chosen and *when*, not
 whether macOS opens an app.
 """
+import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -493,6 +495,135 @@ class TestActionsDispatchOnly(unittest.TestCase):
         self.assertEqual(env["LM_LABEL"], "Deploy")
         self.assertEqual(env["LM_MODE"], "media")
         self.assertTrue(all(k.startswith("LM_") for k in env))
+
+
+class TestVolume(unittest.TestCase):
+    """The volume dial's arithmetic and its helper plumbing.
+
+    A fake `lmvol` (a shell script that logs its argv and answers a fixed level) stands in
+    for the real CoreAudio helper, so these run anywhere and touch no actual volume. The
+    coarse-mode grid prediction is tested directly on `_coarse_feedback` — going through
+    `action()` would synthesise a real media keypress on a machine with lmkey built.
+    """
+
+    LEVEL = "37 unmuted"
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.log = Path(self.dir.name) / "argv.log"
+        fake = Path(self.dir.name) / "lmvol"
+        fake.write_text(f"#!/bin/sh\necho \"$@\" >> {self.log}\necho \"{self.LEVEL}\"\n")
+        fake.chmod(0o755)
+        os.environ["LIBREMICRO_LMVOL"] = str(fake)
+        self.levels: list[float] = []
+        self.a = Actions(on_level=lambda f, label: self.levels.append(f),
+                         volume_step=5, volume_mode="fine")
+
+    def tearDown(self):
+        os.environ.pop("LIBREMICRO_LMVOL", None)
+        with self.a._lock:
+            if self.a._vol_trueup is not None:
+                self.a._vol_trueup.cancel()
+        self.dir.cleanup()
+
+    def seed(self, level: float):
+        with self.a._lock:
+            self.a._volume, self.a._volume_at = level, time.monotonic()
+
+    def logged(self, timeout=2.0):
+        """Wait for the fire-and-forget helper spawn to have run, then return its argv."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.log.exists() and self.log.read_text().strip():
+                return self.log.read_text().strip().splitlines()
+            time.sleep(0.01)
+        return []
+
+    # --- reading ------------------------------------------------------------
+
+    def test_read_volume_prefers_lmvol(self):
+        self.assertEqual(self.a._read_volume(), 37.0)
+        self.assertEqual(self.logged(), ["get"])
+
+    def test_read_volume_survives_a_missing_helper(self):
+        os.environ["LIBREMICRO_LMVOL"] = "/definitely/not/built"
+        # Falls back to osascript; whatever that returns, it must not raise.
+        try:
+            level = self.a._read_volume()
+        except Exception as exc:
+            self.fail(f"_read_volume raised {exc!r}")
+        self.assertTrue(level is None or 0.0 <= level <= 100.0)
+
+    # --- fine mode ------------------------------------------------------------
+
+    def test_nudge_sets_an_absolute_level_and_unmutes_on_up(self):
+        self.seed(40)
+        self.assertTrue(self.a.nudge_volume(+1))
+        self.assertEqual(self.logged(), ["set 45 --no-osd --unmute"])
+        self.assertEqual(self.levels, [0.45])
+
+    def test_nudge_down_does_not_unmute(self):
+        self.seed(40)
+        self.assertTrue(self.a.nudge_volume(-1))
+        self.assertEqual(self.logged(), ["set 35 --no-osd"])
+
+    def test_nudge_clamps_at_the_rails(self):
+        self.seed(2)
+        self.a.nudge_volume(-1)
+        self.assertEqual(self.logged(), ["set 0 --no-osd"])
+
+    # --- coarse mode ----------------------------------------------------------
+
+    def test_prediction_snaps_to_the_next_grid_line(self):
+        # 40% is off-grid; macOS lands the press on the next 6.25% multiple: 43.75.
+        self.seed(40)
+        self.a._coarse_feedback(+1)
+        self.assertAlmostEqual(self.levels[0], 0.4375)
+
+    def test_prediction_from_a_grid_line_moves_a_full_step(self):
+        self.seed(43.75)
+        self.a._coarse_feedback(+1)
+        self.assertAlmostEqual(self.levels[0], 0.50)
+
+    def test_prediction_down_and_clamped(self):
+        self.seed(40)
+        self.a._coarse_feedback(-1)
+        self.assertAlmostEqual(self.levels[0], 0.375)
+        self.seed(1)
+        self.a._coarse_feedback(-1)
+        self.assertAlmostEqual(self.levels[-1], 0.0)
+
+    def test_stale_cache_is_reseeded_from_a_real_read(self):
+        # No seed: the cache is empty, so prediction must first read (fake says 37),
+        # then snap up from there to the next grid line, 37.5.
+        self.a._coarse_feedback(+1)
+        self.assertAlmostEqual(self.levels[0], 0.375)
+
+    def test_trueup_corrects_a_drifted_prediction(self):
+        from libremicro import actions as actions_mod
+        old = actions_mod._VOL_TRUEUP_S
+        actions_mod._VOL_TRUEUP_S = 0.05
+        try:
+            self.seed(90)
+            self.a._coarse_feedback(+1)          # predicts 93.75; the "real" level is 37
+            deadline = time.monotonic() + 2.0
+            while len(self.levels) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.levels[-1], 0.37, "true-up must re-read and correct")
+        finally:
+            actions_mod._VOL_TRUEUP_S = old
+
+    def test_trueup_is_coalesced_across_a_burst(self):
+        self.seed(40)
+        for _ in range(4):
+            self.a._coarse_feedback(+1)
+        with self.a._lock:
+            timer = self.a._vol_trueup
+        self.assertIsNotNone(timer)
+        # Four detents armed and re-armed one timer; no read has happened yet, so the
+        # helper log holds nothing (predictions are pure arithmetic).
+        self.assertFalse(self.log.exists() and "get" in self.log.read_text())
 
 
 if __name__ == "__main__":

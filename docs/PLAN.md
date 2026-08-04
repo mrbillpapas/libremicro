@@ -107,6 +107,16 @@ pretending to be a dial.
   null in `/api/status` the host silently treats a v2 pad as v1 — no batched frames, no battery.
 - **A latched synthesised media key** pins volume at a rail and refuses `set volume`.
   `host/swift/lmkey auxrelease` clears it; `lmkey mods [release]` does the same for modifiers.
+  **Root cause found (2026-08):** the aux key-up posted 2 ms after its key-down fails to pair —
+  measured on macOS 26A5388g, *every* plain volume press latched at 2 ms and none did at
+  10 ms or more. `sendMedia` now floors the aux down→up gap at 15 ms; the latch has not
+  reproduced since.
+- **The native volume HUD is ControlCenter's**, not OSDUIHelper's, on current macOS. It is a
+  system banner presented only by ControlCenter's own media-key hot-key observer; the private
+  OSDManager route (the MonitorControl trick) completes without error and draws nothing —
+  confirmed by log tracing. Consequence: a directly-set level can never show the system
+  overlay, whoever sets it, so "smooth steps" and "native slider" are genuinely exclusive
+  host-side. Coarse mode (real media key, 16-step grid) is what shows the banner.
 - **Never put modifier flags on an NX aux event** — neither in its `0xA00` marker field nor on its
   CGEvent flags. Both break key-up pairing and latch the key. And holding real modifiers does
   *not* give quarter-step volume for a synthesised event; that idea is dead, don't retry it.
@@ -135,7 +145,12 @@ Each is a single value so a different unit is a one-line change:
   request. Nothing PCB-related has ever been committed.
 - **Volume mode.** Default is `coarse` — the real media key, so macOS shows its slider, at the
   cost of 6.25% steps. `fine` gives any step size but no overlay. Both light the pad's underglow
-  bar.
+  bar. (A dispatch-side default of `"fine"` disagreed with everything else and silently cost
+  the slider for any config that didn't set `volume_mode` — fixed. Coarse-mode feedback is now
+  a predicted grid snap per detent plus one coalesced read after the dial goes quiet, instead
+  of a blocking ~60 ms osascript read per detent that also raced the queued keypress. Volume
+  reads and fine-mode sets go through `host/swift/lmvol` — CoreAudio, ~10 ms, no permissions —
+  with osascript as the unbuilt-helper fallback.)
 - **3D view** defaults off, 2D is the default instrument. Flat is easier to aim at; 3D is the
   better picture.
 

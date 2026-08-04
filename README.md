@@ -114,6 +114,15 @@ python3 -m venv .venv && ./.venv/bin/pip install -e host/daemon
 ./.venv/bin/libremicro                        # web UI on http://127.0.0.1:8777
 ```
 
+Two small native helpers make the pad able to act on macOS — `lmkey` synthesises keyboard
+and media keys (needs Accessibility granted to whatever launches the daemon), `lmvol` reads
+and sets system volume through CoreAudio (no permission needed). The daemon runs without
+them, warns once, and picks them up as soon as they exist:
+
+```bash
+cd host/swift && swiftc -O -o lmkey lmkey.swift && swiftc -O -o lmvol lmvol.swift
+```
+
 It runs fine with no device attached, so you can design lighting before you flash anything.
 
 To go back to stock, see [docs/RECOVERY.md](docs/RECOVERY.md).
@@ -133,8 +142,9 @@ shortcuts or notifications. Everything OS-specific is on the host, and it is con
 | Piece | What it uses | Portability |
 |---|---|---|
 | `host/swift/lmkey.swift` | CGEvent / NSEvent | needs a per-OS equivalent (e.g. `libevdev`/`uinput`, `SendInput`) |
+| `host/swift/lmvol.swift` | CoreAudio | swap for PulseAudio/WirePlumber or the Windows mixer |
 | `actions.py` launch/AppleScript | `open -a`, `osascript` | swap for `xdg-open` / `Start-Process` |
-| `actions.py` volume | media keys or `osascript` | swap for PulseAudio/WirePlumber or the Windows mixer |
+| `actions.py` volume | media keys or `lmvol` | swap for PulseAudio/WirePlumber or the Windows mixer |
 | `watchers.py` | Dock badge via Accessibility | needs a different unread source entirely |
 | everything else | pure Python | already portable |
 

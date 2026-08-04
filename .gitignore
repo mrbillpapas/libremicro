@@ -18,6 +18,7 @@ host/swift/wlmon
 host/swift/rpc_probe
 host/swift/rpc_raw
 host/swift/lmkey
+host/swift/lmvol
 
 # Xtensa toolchain — fetched separately, never committed (see tools/README.md)
 tools/xtensa-esp-elf/

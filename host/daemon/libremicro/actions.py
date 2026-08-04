@@ -16,6 +16,7 @@ and it's also why the web UI binds to loopback only: this file is the reason tha
 """
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import subprocess
@@ -49,19 +50,59 @@ MEDIA_ACTIONS = {
 #:            macOS shows NO overlay for a programmatic set.
 #:
 #: Either way the pad shows its own bar across the underglow, so there is feedback even in
-#: fine mode. In coarse mode that costs one extra volume read to learn where the level landed,
-#: which is why it happens after the key is sent rather than before.
+#: fine mode.
+#:
+#: In coarse mode the level shown on the pad is *predicted* — macOS snaps every press to its
+#: 16-step grid, so the landing spot is arithmetic, not a mystery — and then trued up by one
+#: real read shortly after the dial goes quiet. The previous design read the level back
+#: synchronously after every detent, which both blocked the dispatch path (~60 ms of
+#: osascript per detent; a fast spin queued them and the bar lagged) and raced the media key
+#: itself, which is sent through an asynchronous queue and usually hadn't landed yet.
 #:
 #: What is NOT on offer, despite being the obvious idea: the media key with shift+option
 #: held, which is how a human gets quarter steps. Measured on hardware, that does nothing for
 #: a synthesised event — macOS doesn't consult held modifier state when sizing the step of an
 #: injected aux event — and putting the modifiers onto the event itself latches the key, which
 #: then auto-repeats and drives volume to a rail. See host/swift/lmkey.swift.
+#:
+#: Nor is a native overlay for fine mode: on current macOS the volume HUD is a ControlCenter
+#: system banner presented only by its own media-key hot-key observer (confirmed by log
+#: tracing — OSDManager, the old private-API route, no longer draws it). If the level is set
+#: directly, no system UI will show it, whoever does the setting.
 VOLUME_STEP_DEFAULT = 3
 VOLUME_MODE_DEFAULT = "coarse"
 
+#: macOS's media-key volume grid: 16 steps, 6.25% a press.
+_VOL_GRID = 100.0 / 16.0
+
+#: How long after the last detent the coarse-mode true-up read fires. Long enough that a
+#: spinning dial coalesces into one read, short enough that a drifted prediction is corrected
+#: before anyone stares at the bar wondering.
+_VOL_TRUEUP_S = 0.35
+
 _VOL_GET = 'output volume of (get volume settings)'
 _VOL_MUTED = 'output muted of (get volume settings)'
+
+#: host/swift/lmvol — CoreAudio volume helper. Reads in ~10 ms where osascript takes ~60,
+#: sets the level synchronously with no AppleScript in the path, and needs no Accessibility
+#: permission. Everything here falls back to osascript when it isn't built.
+LMVOL_ENV = "LIBREMICRO_LMVOL"
+DEFAULT_LMVOL = Path(__file__).resolve().parents[2] / "swift" / "lmvol"
+LMVOL_BUILD_HINT = "build it with: cd host/swift && swiftc -O -o lmvol lmvol.swift"
+
+
+def lmvol_path() -> Path | None:
+    """Where the built lmvol helper is, or None. Checked per call, like keys.helper_path,
+    so building it while the daemon runs just starts working."""
+    override = os.environ.get(LMVOL_ENV)
+    if override is not None:
+        p = Path(override).expanduser()
+    else:
+        p = DEFAULT_LMVOL
+    try:
+        return p if (p.is_file() and os.access(p, os.X_OK)) else None
+    except OSError:
+        return None
 
 _warned: set[str] = set()
 
@@ -120,8 +161,9 @@ class Actions:
         self._lock = threading.Lock()
         self.volume_step = volume_step
         self.volume_mode = volume_mode
-        self._volume: int | None = None
+        self._volume: float | None = None
         self._volume_at = 0.0
+        self._vol_trueup: threading.Timer | None = None
 
     # --- entry point --------------------------------------------------------
 
@@ -205,17 +247,8 @@ class Actions:
                 if keys is None:
                     return Result(False, "key synthesis unavailable")
                 ok = keys.send_media("vol_up" if direction > 0 else "vol_down")
-                if ok and self._on_level is not None:
-                    # macOS picked the level, so read it back rather than guessing, and show
-                    # it on the pad too. Cached so a fast spin isn't one read per detent.
-                    level = self._read_volume()
-                    if level is not None:
-                        with self._lock:
-                            self._volume, self._volume_at = level, time.monotonic()
-                        try:
-                            self._on_level(level / 100.0, "volume")
-                        except Exception:
-                            pass
+                if ok:
+                    self._coarse_feedback(direction)
                 return Result(bool(ok))
             return self.nudge_volume(direction)
 
@@ -253,15 +286,13 @@ class Actions:
         return Result(False, f"unknown action token: {token!r}")
 
     def nudge_volume(self, direction: int) -> Result:
-        """Set system volume directly, by `volume_step` percent.
+        """Set system volume directly, by `volume_step` percent — "fine" mode.
 
-        Not used by vol_up/vol_down any more — those use the fine media keys, which keep the
-        on-screen overlay. Kept because it is the only way to get an arbitrary step size.
-
-        The level is cached and advanced locally so a fast spin doesn't have to wait on an
-        osascript read per detent — reading takes tens of milliseconds, which a dial would
-        feel. The cache is refreshed whenever it's stale or absent, so anything that changes
-        volume elsewhere is picked up.
+        The level is cached and advanced locally so a fast spin doesn't have to wait on a
+        read per detent. The cache is refreshed whenever it's stale, so anything that changes
+        volume elsewhere is picked up. The write is an *absolute* set of the predicted level
+        rather than a relative nudge, so if two writes ever land out of order the later
+        target still wins and nothing is double-counted.
         """
         step = max(1, int(self.volume_step)) * (1 if direction >= 0 else -1)
         with self._lock:
@@ -271,15 +302,24 @@ class Actions:
                 level = self._read_volume()
                 if level is None:
                     return Result(False, "could not read system volume")
-            level = max(0, min(100, level + step))
-            self._volume = level
+            level = max(0, min(100, round(level) + step))
+            self._volume = float(level)
             self._volume_at = now
 
         # Unmute on the way up, or raising volume from muted appears to do nothing.
-        script = f"set volume output volume {level}"
-        if direction > 0:
-            script += " without output muted"
-        result = self._spawn(["osascript", "-e", script], what="set volume")
+        helper = lmvol_path()
+        if helper is not None:
+            cmd = [str(helper), "set", str(level), "--no-osd"]
+            if direction > 0:
+                cmd.append("--unmute")
+            result = self._spawn(cmd, what="set volume")
+        else:
+            _warn_once("lmvol", f"lmvol not built, falling back to osascript for volume "
+                                f"(slower under a spinning dial) — {LMVOL_BUILD_HINT}")
+            script = f"set volume output volume {level}"
+            if direction > 0:
+                script += " without output muted"
+            result = self._spawn(["osascript", "-e", script], what="set volume")
         if result and self._on_level is not None:
             try:
                 self._on_level(level / 100.0, "volume")
@@ -287,14 +327,79 @@ class Actions:
                 pass          # feedback must never be able to break the action itself
         return result
 
-    def _read_volume(self) -> int | None:
+    def _coarse_feedback(self, direction: int) -> None:
+        """Show a predicted level on the pad after a coarse detent, then true it up.
+
+        macOS snaps every media-key press to its 16-step grid — the next multiple of 6.25%
+        in the pressed direction — so the landing spot is arithmetic. Predicting it keeps
+        the dispatch path free of any blocking read (only the first detent after a quiet
+        spell pays one, to seed the cache), and one deferred read after the dial goes quiet
+        corrects any drift: a press that landed while muted, a rail, another app moving
+        volume at the same time.
+        """
+        with self._lock:
+            level, fresh = self._volume, time.monotonic() - self._volume_at <= 2.0
+        if level is None or not fresh:
+            level = self._read_volume()
+            if level is None:
+                return                       # can't predict; the true-up may still land
+        # Snap to the next grid line in the pressed direction. The epsilon keeps a level
+        # already sitting on the grid moving by a full step instead of not at all.
+        eps = 1e-6
+        if direction > 0:
+            level = min(100.0, (math.floor(level / _VOL_GRID + eps) + 1) * _VOL_GRID)
+        else:
+            level = max(0.0, (math.ceil(level / _VOL_GRID - eps) - 1) * _VOL_GRID)
+        with self._lock:
+            self._volume, self._volume_at = level, time.monotonic()
+        if self._on_level is not None:
+            try:
+                self._on_level(level / 100.0, "volume")
+            except Exception:
+                pass
+        self._schedule_trueup()
+
+    def _schedule_trueup(self) -> None:
+        """(Re)arm the deferred read: one read per burst of detents, not one per detent."""
+        with self._lock:
+            if self._vol_trueup is not None:
+                self._vol_trueup.cancel()
+            t = threading.Timer(_VOL_TRUEUP_S, self._trueup)
+            t.daemon = True
+            self._vol_trueup = t
+            t.start()
+
+    def _trueup(self) -> None:
+        level = self._read_volume()
+        if level is None:
+            return
+        with self._lock:
+            drifted = self._volume is None or abs(self._volume - level) >= 0.5
+            self._volume, self._volume_at = float(level), time.monotonic()
+        if drifted and self._on_level is not None:
+            try:
+                self._on_level(level / 100.0, "volume")
+            except Exception:
+                pass
+
+    def _read_volume(self) -> float | None:
+        """The current output volume, 0-100, or None. Prefers lmvol (~10 ms); falls back to
+        osascript (~60 ms), which also covers a machine where lmvol was never built."""
+        helper = lmvol_path()
+        if helper is not None:
+            try:
+                out = subprocess.run([str(helper), "get"],
+                                     capture_output=True, text=True, timeout=1.0)
+                return max(0.0, min(100.0, float(out.stdout.split()[0])))
+            except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                pass                         # fall through to osascript
         try:
             out = subprocess.run(["osascript", "-e", _VOL_GET],
                                  capture_output=True, text=True, timeout=2.0)
         except (OSError, subprocess.SubprocessError):
             return None
         try:
-            return max(0, min(100, int(out.stdout.strip())))
+            return max(0.0, min(100.0, float(int(out.stdout.strip()))))
         except ValueError:
             return None
 

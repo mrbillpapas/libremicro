@@ -445,8 +445,14 @@ func sendMedia(_ token: String, delayUS: UInt32, fine: Bool = false) throws -> B
         usleep(delayUS)
     }
 
+    // The aux key-up needs real distance from its key-down. At the old 2 ms default the
+    // window server fails to pair them — measured on 26A5388g: every plain vol_down at 2 ms
+    // latched, auto-repeated from 500 ms, and drove volume to the rail; at 10 ms and above,
+    // zero latches across every trial. 15 ms buys margin and is still far below a human
+    // press. This floor applies only to the aux pair; --delay-ms above it is honoured.
+    let auxGapUS = max(delayUS, 15_000)
     ok = postAux(code, down: true) && ok
-    usleep(delayUS)
+    usleep(auxGapUS)
     ok = postAux(code, down: false) && ok
 
     for name in pressed.reversed() {

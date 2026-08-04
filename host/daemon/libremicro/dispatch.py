@@ -41,7 +41,9 @@ class Dispatcher:
         self.actions = Actions(on_profile=self.switch_profile,
                                on_reload=self._reload,
                                volume_step=int(self.cfg.device.get("volume_step", 3)),
-                               volume_mode=str(self.cfg.device.get("volume_mode", "fine")),
+                               # "coarse" everywhere: schema.json and actions.py agree, and this
+                               # default silently being "fine" is what cost the macOS slider.
+                               volume_mode=str(self.cfg.device.get("volume_mode", "coarse")),
                                on_level=self._show_level)
         self.recognizer = events.Recognizer(
             emit=self.handle, is_bound=self.is_bound,
