@@ -24,7 +24,7 @@ working Xtensa disassembler — use the ESP toolchain):
 | `disasm.py <va> <len>` | Disassemble a virtual-address range |
 | `find_l32r.py <literal_va>` | Find the `l32r` instructions that load a given literal (how you find code that references a string/constant) |
 | `analyze_fw.py`, `deep_scan.py`, `dump_strings.py` | String/structure scans for RPC methods, LED tokens, module map |
-| `find_transport.py`, `extract_sources.py` | Locate the HID transport in the app; recover TS from the source map |
+| `find_transport.py` | Locate the HID transport in the vendor app |
 | `enumerate.py`, `rpc_probe.py` | Read-only HID enumeration / RPC probing of a live device |
 
 The **Xtensa toolchain is not committed** (~600 MB). Install Espressif's `xtensa-esp-elf`
