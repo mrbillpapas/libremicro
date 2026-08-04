@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libremicro"
+version = "0.1.0"
+description = "Host daemon for LibreMicro — open firmware tooling for the Work Louder Creator Micro 2"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pyserial>=3.5",
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+libremicro = "libremicro.daemon:main"
+
+[tool.setuptools]
+packages = ["libremicro"]
