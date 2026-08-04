@@ -829,6 +829,11 @@ class TestBadgeReading(unittest.TestCase):
         self.assertEqual(r.value, 0)
         self.assertFalse(r.is_unknown)
 
+    def test_a_tile_for_a_quit_app_is_zero_and_says_so(self):
+        r = self.reading(SAMPLE_TILED_NOT_RUNNING)
+        self.assertEqual(r.value, 0)
+        self.assertIn("not running", r.detail)
+
     def test_two_tiles_take_the_larger_count(self):
         self.assertEqual(self.reading(SAMPLE_TWO_TILES).value, 3)
 

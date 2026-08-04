@@ -404,7 +404,8 @@ def badge_reading(app: str, read=None, installed=None) -> Reading:
         return Reading.of(0, detail=f"{app} is not running", source="dock")
 
     if not badge.labels:
-        return Reading.of(0, detail=f"no badge on {app}", source="dock")
+        where = f"no badge on {app}" + ("" if badge.running else " (not running)")
+        return Reading.of(0, detail=where, source="dock")
 
     counts = [parse_badge_label(label) for label in badge.labels]
     best = max(counts)
@@ -568,7 +569,9 @@ class Entry:
         return {
             "index": self.index,
             "kind": self.kind,
-            "app": self.spec.get("app"),
+            # A kind may default a field the config left out (slack_unread's app), so ask the
+            # watcher before falling back to what was written down.
+            "app": self.spec.get("app") or getattr(self.watcher, "app", None),
             "flash": self.flash,
             "interval_s": self.interval,
             "supported": self.supported,
