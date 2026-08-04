@@ -15,6 +15,7 @@ import threading
 import time
 from collections import deque
 
+from .agent_surface import AgentSurface
 from .config import Config, ConfigError
 from .dispatch import Dispatcher
 from .renderer import Renderer
@@ -37,7 +38,9 @@ class Daemon:
         self.link = Link(port=self.cfg.port, baud=self.cfg.baud,
                          layout=self.cfg.layout, on_event=self.handle_event)
         self.dispatcher = Dispatcher(self)
-        self.renderer = Renderer(self.link, self.cfg, on_tick=self.dispatcher.tick)
+        self.agent = AgentSurface(self)
+        self.agent.extend_actions(self.dispatcher.actions)
+        self.renderer = Renderer(self.link, self.cfg, on_tick=self._tick)
         # Notification watchers poll on their own threads and drive Renderer.pulse; nothing
         # here touches the input or render path. `self.watchers.state()` is the read-only
         # view of why a key is or isn't pulsing.
@@ -48,6 +51,11 @@ class Daemon:
         self._ui_host = webui.get("host", "127.0.0.1")
         self._ui_port = int(webui.get("port", 8777))
         self._httpd = None
+
+    def _tick(self, now: float) -> None:
+        """Frame tick, fanned out — Renderer.on_tick takes a single callable."""
+        self.dispatcher.tick(now)
+        self.agent.tick(now)
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -83,6 +91,7 @@ class Daemon:
     def stop(self) -> None:
         print("\nshutting down", flush=True)
         self.watchers.stop()
+        self.agent.close()
         self.renderer.stop()
         if self._httpd is not None:
             self._httpd.shutdown()
@@ -105,6 +114,7 @@ class Daemon:
         self.renderer.set_config(cfg)
         self.dispatcher.config_changed()
         self.watchers.config_changed()
+        self.agent.config_changed()
 
     def reload_config(self) -> bool:
         try:

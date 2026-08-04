@@ -29,7 +29,8 @@
       "type": "string"
     },
     "power": { "$ref": "#/$defs/power" },
-    "webui": { "$ref": "#/$defs/webui" }
+    "webui": { "$ref": "#/$defs/webui" },
+    "agent": { "$ref": "#/$defs/agent" }
   },
 
   "$defs": {
@@ -224,7 +225,11 @@
             "vol_up", "vol_down", "mute", "play_pause", "next_track", "prev_track",
             "bright_up", "bright_down",
             "desk_up", "desk_down", "stand_sit",
-            "sleep", "lock", "profile_next", "profile_prev", "reload_config"
+            "sleep", "lock", "profile_next", "profile_prev", "reload_config",
+            "agent_approve", "agent_deny",
+            "agent_session_next", "agent_session_prev", "agent_session_focus",
+            "agent_effort_up", "agent_effort_down", "agent_effort_apply",
+            "agent_dictate_start", "agent_dictate_stop", "agent_dictate"
           ]
         },
         "flash": {
@@ -410,6 +415,110 @@
         "power_off_hold_ms": {
           "type": "integer", "minimum": 200, "default": 2000
         }
+      }
+    },
+
+    "agent": {
+      "description": "Agentic-coding control surface (docs/AGENT-SURFACE.md). Status arrives from Claude Code hooks POSTing to /api/agent/status; nothing here polls. Every field is optional with a working default. Note *_key fields are DISPLAY roles — they say which key to illuminate; binding the action is separate, under profiles.*.keys[].on.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "harness": { "type": "string", "default": "claude-code" },
+        "status_key": {
+          "description": "Shows the selected session's status.",
+          "type": "integer", "minimum": 0, "maximum": 12
+        },
+        "alert_key": {
+          "description": "Pulses when a session OTHER than the displayed one is waiting, so a background session can't hijack the main display.",
+          "type": "integer", "minimum": 0, "maximum": 12
+        },
+        "approve_key": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "deny_key": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "dictate_key": { "type": "integer", "minimum": 0, "maximum": 12 },
+        "effort_keys": {
+          "description": "The effort ladder rendered as a bar.",
+          "type": "array", "maxItems": 5,
+          "items": { "type": "integer", "minimum": 0, "maximum": 12 }
+        },
+        "stale_after_s": {
+          "description": "Working/waiting decays to unknown after this long with no report — catches a session killed mid-turn. 'idle' deliberately does not expire, since silence is what idle predicts.",
+          "type": "number", "minimum": 1, "default": 90
+        },
+        "session_ttl_s": {
+          "description": "Forget a session entirely after this long with no report.",
+          "type": "number", "minimum": 1, "default": 1800
+        },
+        "done_hold_s": {
+          "description": "How long 'done' shows before decaying to idle.",
+          "type": "number", "minimum": 0, "default": 10
+        },
+        "follow_active": { "type": "boolean", "default": true },
+        "prioritise_waiting": {
+          "description": "A waiting session wins the display over the merely-active one.",
+          "type": "boolean", "default": true
+        },
+        "require_waiting": {
+          "description": "Only allow approve/deny while the session reports 'waiting'. Keep this true: a keystroke cannot be addressed to a session, so an unguarded approve key is a blind Return into whatever is frontmost.",
+          "type": "boolean", "default": true
+        },
+        "focus_first": {
+          "description": "Run the focus hook before sending keys.",
+          "type": "boolean", "default": false
+        },
+        "focus_delay_ms": { "type": "integer", "minimum": 0, "default": 250 },
+        "approve": { "$ref": "#/$defs/agent_keystroke" },
+        "deny": { "$ref": "#/$defs/agent_keystroke" },
+        "effort": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "levels": { "type": "array", "items": { "type": "string" } },
+            "apply": {
+              "description": "How a chosen effort level is applied. Claude Code exposes no way to set effort on a live session from outside, so 'slash_command' types one into the focused session and 'none' makes the dial read-only — which is the honest choice if you'd rather have no action than a fragile one.",
+              "type": "string", "enum": ["slash_command", "none"], "default": "slash_command"
+            }
+          }
+        },
+        "colors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unknown": { "$ref": "#/$defs/color" },
+            "idle":    { "$ref": "#/$defs/color" },
+            "working": { "$ref": "#/$defs/color" },
+            "waiting": { "$ref": "#/$defs/color" },
+            "error":   { "$ref": "#/$defs/color" },
+            "done":    { "$ref": "#/$defs/color" }
+          }
+        },
+        "dictation": {
+          "description": "Push-to-dictate: hold a key to record, release to transcribe and type. Bind to 'hold'/'release', not 'press' — press fires on key release, so hold is the only kind that fires while the key is down.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "whisper_bin": { "type": "string", "default": "auto" },
+            "ffmpeg_bin": { "type": "string", "default": "ffmpeg" },
+            "model": { "type": "string", "default": "auto" },
+            "audio_device": { "type": "string", "default": ":0" },
+            "language": { "type": "string", "default": "en" },
+            "threads": { "type": "integer", "minimum": 1, "default": 4 },
+            "max_seconds": {
+              "description": "Caps a stuck key. 0 disables the cap.",
+              "type": "number", "minimum": 0, "default": 60
+            }
+          }
+        }
+      }
+    },
+
+    "agent_keystroke": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shortcut": { "type": "string" },
+        "text": { "type": "string" }
       }
     },
 

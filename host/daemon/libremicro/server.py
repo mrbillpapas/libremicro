@@ -72,7 +72,16 @@ class Api:
             # you haven't bound it" and "because this firmware can't report presses".
             "firmware": d.link.firmware,
             "watchers": self._watcher_state(),
+            "agent": d.agent.snapshot(),
         }
+
+    def agent_status(self, body: dict) -> dict:
+        """Ingest one Claude Code hook report. See docs/AGENT-SURFACE.md.
+
+        The hook forwards its stdin verbatim; this reads `hook_event_name` itself rather than
+        making the user's shell one-liner do any parsing.
+        """
+        return self.daemon.agent.ingest(body)
 
     def _watcher_state(self) -> list | None:
         probe = getattr(self.daemon, "watchers", None)
@@ -243,6 +252,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/simulate": self.api.simulate,
             "/api/profile": self.api.set_profile,
             "/api/mode": self.api.set_mode,
+            "/api/agent/status": self.api.agent_status,
         })
 
     def _mutate(self, routes: dict[str, Callable[[dict], Any]]) -> None:
