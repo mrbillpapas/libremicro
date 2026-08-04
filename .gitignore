@@ -30,3 +30,6 @@ efuse_summary.txt
 
 # macOS
 .DS_Store
+
+# Built Swift helper symlinked for scripts/
+scripts/wlrpc

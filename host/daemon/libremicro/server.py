@@ -91,8 +91,10 @@ class Api:
     def identify(self, body: dict) -> dict:
         target = body.get("target", "keys")
         index = int(body.get("index", 0))
-        # Preview holds the render loop off the strips while the sweep drives them raw.
-        self.daemon.renderer.preview_frame(Frame.blank(), ttl=0.0)
+        # Hold the render loop off the strips entirely — a preview frame would still be a
+        # frame and would blank the pixel identify just lit. Default outlasts a 1s step so
+        # the LED stays visible; the sweep re-arms it on each call.
+        self.daemon.renderer.hold(float(body.get("hold", 4.0)))
         ok = self.daemon.link.identify(target, index)
         return {"ok": ok, "connected": self.daemon.link.connected}
 

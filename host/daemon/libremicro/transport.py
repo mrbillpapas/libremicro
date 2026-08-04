@@ -60,7 +60,8 @@ class Link:
         self.on_event = on_event
         self.port: str | None = None
         self._ser = None
-        self._lock = threading.Lock()
+        # Reentrant: a failed write calls _drop(), which takes this lock too.
+        self._lock = threading.RLock()
         self._reader: threading.Thread | None = None
         self._stop = threading.Event()
         self._last: Frame | None = None
@@ -87,7 +88,8 @@ class Link:
         if not port:
             return False
         try:
-            self._ser = serial.Serial(port, self.baud, timeout=0.2)
+            # write_timeout keeps a wedged device from blocking the render loop forever.
+            self._ser = serial.Serial(port, self.baud, timeout=0.2, write_timeout=0.5)
         except Exception:
             self._ser = None
             return False
@@ -177,16 +179,23 @@ class Link:
         if not self.ensure_connected():
             return False
         payload = "".join(l.rstrip() + "\n" for l in lines).encode()
+        failed = False
         with self._lock:
             ser = self._ser
             if ser is None:
                 return False
             try:
+                # No flush() here on purpose. pyserial's flush is tcdrain(), which blocks
+                # until the device has drained every byte — at 30 fps that serialises the
+                # render loop against USB completion, and if the device stops draining it
+                # blocks forever with no timeout. write_timeout bounds the write instead.
                 ser.write(payload)
-                ser.flush()
             except Exception:
-                self._drop()
-                return False
+                failed = True
+        if failed:
+            # Outside the lock: _drop() takes it too.
+            self._drop()
+            return False
         return True
 
     def set_brightness(self, value: int) -> None:

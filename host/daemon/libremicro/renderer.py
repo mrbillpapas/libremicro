@@ -50,6 +50,7 @@ class Renderer:
 
         self._last_activity = time.monotonic()
         self._dim_level = 1.0
+        self._hold_until = 0.0
 
         self._rebuild()
 
@@ -130,6 +131,25 @@ class Renderer:
             self._preview = None
             self._preview_effect = None
             self._preview_until = 0.0
+            self._hold_until = 0.0
+
+    def hold(self, seconds: float) -> None:
+        """Stop writing frames entirely for `seconds`, leaving the strips as they are.
+
+        The identify sweep needs this. It writes a single raw pixel by strip index, and a
+        preview frame can't express that — a blank preview would still be a frame, so the
+        render loop would push it and blank the pixel we just lit. Holding is the only way
+        to hand the strips over to something else.
+        """
+        with self._lock:
+            self._preview = None
+            self._preview_effect = None
+            self._preview_until = 0.0
+            self._hold_until = time.monotonic() + max(0.0, seconds)
+
+    @property
+    def held(self) -> bool:
+        return time.monotonic() < self._hold_until
 
     @property
     def previewing(self) -> bool:
@@ -225,6 +245,8 @@ class Renderer:
             time.sleep(max(0.0, interval - (time.monotonic() - started)))
 
     def _tick(self, now: float) -> None:
+        if self.held:
+            return
         scale = 1.0 if self.previewing else self._idle_scale(now)
         self._dim_level = scale
         self.link.set_brightness(round(self.cfg.brightness * scale))
