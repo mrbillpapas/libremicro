@@ -51,23 +51,15 @@
     </div>
 
     <div class="deviceview">
-      <svg id="device" viewBox="0 0 400 386" role="group" aria-label="Creator Micro 2 LED layout">
+      <svg id="device" viewBox="0 0 400 412" role="group" aria-label="Creator Micro 2 LED layout">
         <!-- built by app.js from layout.key_rows and the index mappings -->
       </svg>
     </div>
 
     <div class="stage-controls">
-      <label class="chk"><input type="checkbox" id="chk-indices" checked> Strip indices</label>
+      <label class="chk" title="Logical LED index — what profiles[*].keys[].index means. During an identify sweep the board switches to strip numbering."><input type="checkbox" id="chk-indices" checked> LED indices</label>
       <label class="chk"><input type="checkbox" id="chk-labels"> Key labels</label>
       <label class="chk"><input type="checkbox" id="chk-anim" checked> Animate preview</label>
-      <label class="field inline" title="Which columns the 2-key and 3-key rows occupy is unverified — this is a view preference only, it is not written to the config">
-        <span>Short rows</span>
-        <select id="sel-align">
-          <option value="center">centred (provisional)</option>
-          <option value="left">left</option>
-          <option value="right">right</option>
-        </select>
-      </label>
       <span class="spacer"></span>
       <label class="chk"><input type="checkbox" id="chk-live"> Live preview on device</label>
       <button id="btn-stop-preview" type="button" class="ghost small">Stop preview</button>
@@ -89,6 +81,8 @@
     <div class="panel" id="panel-color" role="tabpanel" aria-labelledby="tab-color" tabindex="0">
       <h3 class="phead">Selected LED <span class="pill" id="sel-name">none</span></h3>
       <p class="hint" id="sel-hint">Click an LED in the device view, or tab into it and press Enter.</p>
+      <!-- Filled in for the two LEDs under the bottom row's single wide keycap. -->
+      <p class="hint shared-note" id="sel-shared" hidden></p>
 
       <div id="ce-led" class="ce-slot"></div>
 
@@ -100,7 +94,11 @@
 
       <div id="status-led-box" class="subbox" hidden>
         <h4>Status LED duty</h4>
-        <p class="hint">Three single-colour LEDs on GPIO 35 / 45 / 48 — 8-bit PWM duty, not RGB.</p>
+        <p class="hint">
+          Three single-colour LEDs on GPIO 35 / 45 / 48 — 8-bit PWM duty, not RGB. They sit beside
+          the capacitive touch pad at the pad's bottom-left, which is where the device view draws
+          them.
+        </p>
         <div id="status-sliders" class="stack"></div>
       </div>
 
@@ -204,17 +202,20 @@
     <div class="panel" id="panel-identify" role="tabpanel" aria-labelledby="tab-identify" tabindex="0" hidden>
       <h3 class="phead">Identify sweep</h3>
       <p class="hint">
-        Lights one LED at a time on the physical pad. When you see which LED lit, click that
-        position in the device view to record it. This is what turns the provisional
-        index&nbsp;→&nbsp;position guesses into confirmed <code>layout.key_positions</code> /
-        <code>layout.underglow_positions</code>.
+        <em>Nothing here is required to design lighting.</em> Both strips' wiring order is confirmed
+        and ships as the default — per-key strip index 0 is the bottom-right key, and the chain
+        snakes upward from there. This panel is for <em>confirming that on your own unit, or
+        correcting it</em>: it lights one LED at a time on the pad, you click the position that lit,
+        and <code>Write mapping to config</code> stores the result as an explicit
+        <code>layout.key_positions</code> / <code>layout.underglow_positions</code> override.
       </p>
       <p class="hint">
-        Recorded key positions are <em>[row, col]</em> where <code>col</code> is the ordinal within
-        that physical row, left to right — not the scan-matrix column. Which matrix columns the
-        2-key and 3-key rows populate is a separate unverified question (see
-        <code>docs/HARDWARE.md</code>), so this UI deliberately does not assert one.
-        Underglow positions are <em>[x, y]</em> in the 3×3 grid, 0–2 each, centre excluded.
+        The table starts from the mapping in force, so an unchanged sweep just re-states the
+        default. Positions are the pad's <em>physical</em> geometry: keys are
+        <em>[row, ordinal-within-row]</em> left to right (not the scan-matrix column, and not the
+        4×4 grid column — the grid column is derived from it), underglow is <em>[x, y]</em> in the
+        3×3 grid, 0–2 each, centre excluded. Whether the matrix column order runs left to right is
+        a separate question that only matters for input events (see <code>docs/HARDWARE.md</code>).
       </p>
 
       <div class="row">
@@ -242,11 +243,16 @@
       </div>
 
       <div class="row">
-        <button id="btn-id-provisional" type="button" class="ghost small">Fill with provisional</button>
+        <button id="btn-id-defaults" type="button" class="ghost small">Reset to confirmed default</button>
         <button id="btn-id-clear" type="button" class="ghost small">Clear all</button>
       </div>
 
-      <label class="chk"><input type="checkbox" id="chk-verified"> Mark mapping as verified (<code>layout.verified</code>)</label>
+      <label class="chk"><input type="checkbox" id="chk-verified"> Mapping verified on this unit (<code>layout.verified</code>)</label>
+      <p class="hint">
+        Ticked is the normal state, because the default mapping is confirmed hardware. Untick it to
+        record that you overrode the mapping without checking it against the pad — the UI then warns
+        that lighting may land on the wrong LEDs until you confirm it.
+      </p>
       <div class="row">
         <button id="btn-id-write" type="button" class="primary small">Write mapping to config</button>
       </div>

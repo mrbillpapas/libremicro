@@ -8,11 +8,6 @@
     "fps": 30
   },
 
-  "layout": {
-    "key_rows": [2, 4, 4, 3],
-    "verified": false
-  },
-
   "palettes": {
     "sunset": {
       "label": "Sunset",

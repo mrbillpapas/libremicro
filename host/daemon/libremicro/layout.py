@@ -11,10 +11,13 @@ lighting wrong:
   logical index 0..12, the stable identity used in config (`keys[].index`) and in the
                 web UI. Assigned row-major over populated slots only.
 
-`logical` is the config's contract. Strip and matrix indices are device details that get
-translated at the edges. See `docs/HARDWARE.md` — the strip-to-physical mappings are NOT
-yet verified on hardware, so every mapping here is overridable from config and the
-defaults are marked provisional.
+`logical` is the config's contract — `Frame.keys` is indexed by it, and `keys[].index` in
+config means it. Strip and matrix indices are device details translated at the edges
+(`transport._frame_lines` does the strip translation, so nothing above it should).
+
+The strip-to-physical mapping is CONFIRMED on hardware and ships as a default here rather
+than in config, because the wiring is identical on every Creator Micro 2. See
+`docs/HARDWARE.md`. Config can still override it for a unit that differs.
 """
 from __future__ import annotations
 

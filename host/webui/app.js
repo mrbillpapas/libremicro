@@ -15,10 +15,38 @@ const UG_COUNT = 8;
 const STATUS_COUNT = 3;
 const DEFAULT_KEY_ROWS = [2, 4, 4, 3];
 
-/* The 3x3-minus-centre underglow ring, listed clockwise from the top-left corner.
- * This order is also the PROVISIONAL strip-index -> position guess (index i lights ring[i])
- * and the traversal order used by ring effects. Unverified: see docs/HARDWARE.md. */
+/* The 3x3-minus-centre underglow ring, listed clockwise from the top-left corner — layout.py's
+ * UNDERGLOW_RING. All eight are the same physical size, evenly spaced around the square (CONFIRMED
+ * — docs/HARDWARE.md). The (gx, gy) pairs are the position identity the config stores, and this
+ * order IS the ring numbering: it indexes the underglow array posted to /api/preview/frame and is
+ * the traversal order for `direction: "ring"`, so nothing here may be reordered casually.
+ * Which STRIP index lights each of these is a separate mapping (DEFAULT_UNDERGLOW_POSITIONS). */
 const RING_ORDER = [[0, 0], [1, 0], [2, 0], [2, 1], [2, 2], [1, 2], [0, 2], [0, 1]];
+
+/* Everything on the pad sits on one 4x4 grid, 13 of the 16 slots being key switches — CONFIRMED
+ * from the faceplate. These three constants mirror layout.py's KEY_GRID_COLS / SHARED_KEYCAPS /
+ * FEATURES and are the only place this file asserts physical placement.
+ *
+ * KEY_GRID_COLS[row][ordinal] = grid column. The config records key positions as
+ * [row, ordinal-within-row] (that is the schema contract and it has not changed); the grid column
+ * is a rendering detail derived here, exactly as layout.grid_col() does on the daemon side. */
+const GRID_COLS = 4;
+const KEY_GRID_COLS = [[1, 2], [0, 1, 2, 3], [0, 1, 2, 3], [1, 2, 3]];
+
+/* Logical key indices that share ONE physical keycap: 13 switches, 12 caps. Logical index runs
+ * row-major over populated slots, so 10 and 11 are the bottom row's middle two — the wide cap
+ * spanning grid columns 1-2. Both LEDs stay independently addressable (a two-pixel gradient
+ * across one cap is the nice use for it); what is unreliable is binding the halves to different
+ * actions, since a user cannot choose which half they press. */
+const SHARED_KEYCAPS = [[10, 11]];
+
+/* Non-key controls, as [row, gridColumn]. NOT addressable LEDs and never selectable — drawn as
+ * ghosts purely so the board is recognisable as the actual pad. */
+const FEATURES = [
+  { kind: 'encoder', row: 0, gcol: 0, label: 'encoder' },
+  { kind: 'joystick', row: 0, gcol: 3, label: 'joystick' },
+  { kind: 'touch', row: 3, gcol: 0, label: 'touch pad' },
+];
 
 const EFFECT_NAMES = ['solid', 'gradient', 'rainbow', 'breathe', 'chase', 'ripple', 'sparkle', 'wipe', 'comet', 'off'];
 const DIRECTIONS = ['horizontal', 'vertical', 'radial', 'ring'];
@@ -27,18 +55,40 @@ const BLENDS = ['replace', 'multiply', 'screen', 'overlay'];
 
 const EFFECT_DEFAULTS = { speed: 0.3, intensity: 0.5, direction: 'horizontal', reverse: false, target: 'all', blend: 'replace' };
 
-/* SVG geometry. The underglow is drawn as a frame of 8 tiles in a 3x3 grid whose centre cell
- * holds the key cluster — the bands are deliberately narrower than a true third so the keys
- * fit inside without covering the ring. Grid topology (x,y in 0..2) is what the config stores. */
+/* Strip index -> physical position, CONFIRMED on hardware (layout.py DEFAULT_KEY_POSITIONS /
+ * DEFAULT_UNDERGLOW_POSITIONS). Both chains are wired as one serpentine starting at the
+ * bottom-right, so strip order is NOT reading order: index 0 is the bottom-right key, and the
+ * top-left key is index 11. Every Creator Micro 2 is wired the same way, which is why this ships
+ * as a built-in default instead of something each owner rediscovers with the identify sweep.
+ * `layout.key_positions` / `layout.underglow_positions` still override it per index. */
+const DEFAULT_KEY_POSITIONS = [
+  [3, 2], [3, 1], [3, 0],
+  [2, 0], [2, 1], [2, 2], [2, 3],
+  [1, 3], [1, 2], [1, 1], [1, 0],
+  [0, 0], [0, 1],
+];
+const DEFAULT_UNDERGLOW_POSITIONS = [
+  [2, 2], [1, 2], [0, 2],
+  [0, 1],
+  [0, 0], [1, 0], [2, 0],
+  [2, 1],
+];
+
+/* SVG geometry, in one place. The board is a square: the 8 underglow LEDs are equal-sized cells
+ * whose centres are evenly spaced around it (3x3 minus centre), and the 4x4 key grid sits inside
+ * the ring sharing its centre. Nothing here is derived from row widths — every slot has a fixed
+ * grid position now. */
 const GEO = {
-  board: { x: 8, y: 8, w: 384, h: 324, r: 18 },
-  xEdges: [8, 66, 334, 392],
-  yEdges: [8, 58, 282, 332],
-  keyArea: { x: 66, y: 58, w: 268, h: 224 },
-  // Sized so the key cluster leaves the dashed "no centre LED" outline visible around it.
-  key: { w: 52, h: 40, gap: 9, r: 8 },
-  status: { y: 344, h: 24, w: 44, gap: 14, r: 6 },
-  vbW: 400, vbH: 386,
+  board: { x: 8, y: 8, w: 384, h: 384, r: 22 },
+  // inset = distance from the board edge to an underglow cell CENTRE; size is the same for all 8.
+  ug: { inset: 26, size: 32, r: 10 },
+  keyBand: { x: 57, y: 81, w: 286, h: 238 },
+  key: { gap: 10, r: 9 },
+  // The 3 PWM status LEDs are a vertical stack at the bottom-left, under the touch pad and
+  // immediately below the key cluster — where they physically are.
+  status: { x: 57, y: 324, w: 34, h: 18, gap: 5, r: 5 },
+  noteY: [404],
+  vbW: 400, vbH: 412,
 };
 
 /* ======================================================= 2. colour science */
@@ -342,7 +392,9 @@ const api = {
 const OFFLINE_CONFIG = {
   version: 2,
   device: { port: 'auto', brightness: 200, fps: 30 },
-  layout: { key_rows: DEFAULT_KEY_ROWS.slice(), verified: false },
+  // No key_positions / underglow_positions and no `verified`: the confirmed wiring order is the
+  // default on both sides, so a config only carries these once someone overrides them.
+  layout: { key_rows: DEFAULT_KEY_ROWS.slice() },
   palettes: {},
   active_profile: 'default',
   profiles: {
@@ -411,104 +463,209 @@ function keyRows() {
   return Array.isArray(r) && r.length && r.every((n) => Number.isInteger(n) && n > 0) ? r : DEFAULT_KEY_ROWS;
 }
 
+/** Whether config declares the shipped index mapping wrong / unchecked for this unit. */
+const mappingVerified = () => state.config?.layout?.verified !== false;
+
 function readPositions(arr, count, fallback, max) {
-  let provisional = false;
+  let fromDefaults = false;
   const out = [];
   for (let i = 0; i < count; i++) {
     const v = Array.isArray(arr) ? arr[i] : undefined;
     const good = Array.isArray(v) && v.length === 2 && v.every((n) => Number.isInteger(n) && n >= 0 && (max === undefined || n <= max));
     if (good) out.push([v[0], v[1]]);
-    else { out.push(fallback[i] ? fallback[i].slice() : null); provisional = true; }
+    else { out.push(fallback[i] ? fallback[i].slice() : null); fromDefaults = true; }
   }
-  return { positions: out, provisional };
+  return { positions: out, fromDefaults };
+}
+
+/** Grid column for every key, per row: KEY_GRID_COLS when the row width matches the real pad. */
+function gridColsFor(rows) {
+  return rows.map((n, r) => {
+    const confirmed = KEY_GRID_COLS[r];
+    if (confirmed && confirmed.length === n) return confirmed.slice();
+    // A config with row widths the faceplate doesn't have: fall back to left-aligned columns
+    // rather than pretending to know where those keys sit. renderStageNote() says so.
+    return Array.from({ length: n }, (_, i) => i);
+  });
+}
+
+/** Logical key index -> [row, ordinal within row] for the given row widths. */
+function logicalPos(rows, logical) {
+  let n = logical;
+  for (let r = 0; r < rows.length; r++) {
+    if (n < rows[r]) return [r, n];
+    n -= rows[r];
+  }
+  return null;
 }
 
 function buildGeometry() {
   const rows = keyRows();
-  const { keyArea, key } = GEO;
-  const maxCols = Math.max(...rows);
+  const gcols = gridColsFor(rows);
+  const nCols = Math.max(GRID_COLS, ...gcols.map((cs) => Math.max(0, ...cs) + 1));
+  const nRows = Math.max(KEY_GRID_COLS.length, rows.length);
+  const band = GEO.keyBand, gap = GEO.key.gap;
+  const kw = (band.w - (nCols - 1) * gap) / nCols;
+  const kh = (band.h - (nRows - 1) * gap) / nRows;
+  const colX = (c) => band.x + c * (kw + gap);
+  const rowY = (r) => band.y + r * (kh + gap);
 
-  // Physical key cells. Short rows (the 2-key and 3-key rows) are laid out CENTRED, which is a
-  // provisional choice: which matrix columns those rows populate is not verified.
-  const align = prefs.read('shortRowAlign', 'center');
+  // One cell per switch, at its fixed grid position. `col` stays the ORDINAL within the row —
+  // that is what the config records and what the identify sweep writes — and `gcol` is the grid
+  // column it translates to, used for drawing only.
   const cells = [];
-  const rowH = key.h, rowGap = key.gap;
-  const blockH = rows.length * rowH + (rows.length - 1) * rowGap;
-  const y0 = keyArea.y + (keyArea.h - blockH) / 2;
   rows.forEach((n, r) => {
-    const rowW = n * key.w + (n - 1) * key.gap;
-    const fullW = maxCols * key.w + (maxCols - 1) * key.gap;
-    const pad = fullW - rowW;
-    const offset = align === 'left' ? 0 : align === 'right' ? pad : pad / 2;
-    const x0 = keyArea.x + (keyArea.w - fullW) / 2 + offset;
-    for (let c = 0; c < n; c++) {
-      const x = x0 + c * (key.w + key.gap);
-      cells.push({ row: r, col: c, x, y: y0 + r * (rowH + rowGap), w: key.w, h: rowH, cx: x + key.w / 2, cy: y0 + r * (rowH + rowGap) + rowH / 2 });
+    for (let o = 0; o < n; o++) {
+      const gcol = gcols[r][o];
+      const x = colX(gcol), y = rowY(r);
+      cells.push({ row: r, col: o, gcol, x, y, w: kw, h: kh, cx: x + kw / 2, cy: y + kh / 2 });
     }
   });
+  const cellAt = (r, o) => cells.find((c) => c.row === r && c.col === o) || null;
 
-  // Underglow cells: the 8 populated positions of the 3x3 grid, centre excluded.
+  // Physical keycaps: 13 switches, 12 caps. A SHARED_KEYCAPS group (logical indices, translated
+  // to [row, ordinal] here) becomes ONE cap whose halves are still separate LEDs.
+  const caps = [];
+  const capOf = new Map();
+  for (const group of SHARED_KEYCAPS) {
+    const cs = group.map((li) => { const p = logicalPos(rows, li); return p && cellAt(p[0], p[1]); });
+    if (cs.some((c) => !c)) continue;                                  // not this row layout
+    cs.sort((a, b) => a.gcol - b.gcol);
+    if (cs.some((c) => c.row !== cs[0].row)) continue;                 // not one physical cap
+    if (cs.some((c, i) => i && c.gcol !== cs[i - 1].gcol + 1)) continue;
+    const last = cs[cs.length - 1];
+    const cap = { shared: true, cells: cs, x: cs[0].x, y: cs[0].y, w: last.x + last.w - cs[0].x, h: cs[0].h };
+    // Split the cap into one region per LED, meeting halfway between the cells they cover, so
+    // the halves tile the whole cap with no seam gap.
+    cs.forEach((c, i) => {
+      c.hx0 = i === 0 ? cap.x : (cs[i - 1].x + cs[i - 1].w + c.x) / 2;
+      c.hx1 = i === cs.length - 1 ? cap.x + cap.w : (c.x + c.w + cs[i + 1].x) / 2;
+      c.capIndex = i;
+      c.capCount = cs.length;
+    });
+    caps.push(cap);
+    for (const c of cs) capOf.set(`${c.row},${c.col}`, cap);
+  }
+  for (const c of cells) {
+    const id = `${c.row},${c.col}`;
+    if (capOf.has(id)) continue;
+    const cap = { shared: false, cells: [c], x: c.x, y: c.y, w: c.w, h: c.h };
+    caps.push(cap);
+    capOf.set(id, cap);
+  }
+
+  // Underglow: 8 equal cells, centres evenly spaced around the square, no centre LED.
+  const ugCentre = (g, axis) => {
+    const b = GEO.board, ins = GEO.ug.inset;
+    return (axis === 'x' ? b.x : b.y) + ins + (g * ((axis === 'x' ? b.w : b.h) - 2 * ins)) / 2;
+  };
   const ugCells = RING_ORDER.map(([gx, gy], ring) => {
-    const x = GEO.xEdges[gx], w = GEO.xEdges[gx + 1] - GEO.xEdges[gx];
-    const y = GEO.yEdges[gy], h = GEO.yEdges[gy + 1] - GEO.yEdges[gy];
-    return { gx, gy, ring, x: x + 3, y: y + 3, w: w - 6, h: h - 6, cx: x + w / 2, cy: y + h / 2 };
+    const s = GEO.ug.size, cx = ugCentre(gx, 'x'), cy = ugCentre(gy, 'y');
+    return { gx, gy, ring, x: cx - s / 2, y: cy - s / 2, w: s, h: s, cx, cy };
   });
-
-  // index -> position mappings, from config where present, otherwise provisional defaults
-  const provKeys = cells.map((c) => [c.row, c.col]);           // strip order == reading order
-  const provUg = RING_ORDER.map((p) => p.slice());             // strip order == clockwise ring
-  const kp = readPositions(state.config?.layout?.key_positions, KEY_COUNT, provKeys);
-  const up = readPositions(state.config?.layout?.underglow_positions, UG_COUNT, provUg, 2);
-
-  const cellAt = (r, c) => cells.find((x) => x.row === r && x.col === c) || null;
   const ugAt = (gx, gy) => ugCells.find((x) => x.gx === gx && x.gy === gy) || null;
+  const noCentre = { x: ugCentre(1, 'x') - GEO.ug.size / 2, y: ugCentre(1, 'y') - GEO.ug.size / 2, w: GEO.ug.size, h: GEO.ug.size };
 
-  const cx0 = GEO.board.x + GEO.board.w / 2, cy0 = GEO.board.y + GEO.board.h / 2;
-  const maxR = Math.hypot(GEO.board.w / 2, GEO.board.h / 2);
-  const spatial = (cell) => {
-    const dx = cell.cx - cx0, dy = cell.cy - cy0;
+  // The three non-key controls, at their confirmed grid slots. Drawn, never addressable.
+  const featureCells = FEATURES
+    .filter((f) => f.row < nRows && f.gcol < nCols && !cells.some((c) => c.row === f.row && c.gcol === f.gcol))
+    .map((f) => {
+      const x = colX(f.gcol), y = rowY(f.row);
+      return { ...f, x, y, w: kw, h: kh, cx: x + kw / 2, cy: y + kh / 2 };
+    });
+
+  /* STRIP index -> position. The confirmed wiring order ships as the default; config overrides
+   * it per index. This mapping is wiring detail: it is what the identify sweep records and what
+   * gets displayed for reference, and NOTHING else in this page depends on it (see below). */
+  const defKeys = DEFAULT_KEY_POSITIONS.map((p) => p.slice());
+  const defUg = DEFAULT_UNDERGLOW_POSITIONS.map((p) => p.slice());
+  const kp = readPositions(state.config?.layout?.key_positions, KEY_COUNT, defKeys);
+  const up = readPositions(state.config?.layout?.underglow_positions, UG_COUNT, defUg, 2);
+  const keyPosToStrip = new Map();
+  kp.positions.forEach((p, i) => { if (p && !keyPosToStrip.has(p.join(','))) keyPosToStrip.set(p.join(','), i); });
+  const ugPosToStrip = new Map();
+  up.positions.forEach((p, i) => { if (p && !ugPosToStrip.has(p.join(','))) ugPosToStrip.set(p.join(','), i); });
+
+  /* Normalised LED coordinates for spatial effects. Deliberately the SAME normalisation the
+   * daemon uses (layout.key_xy / underglow_xy): grid position over grid extent, not pixels on
+   * this drawing, so what the preview shows is what the device renders. */
+  const spatial = (x01, y01) => {
+    const dx = x01 - 0.5, dy = y01 - 0.5;
     let ang = Math.atan2(dx, -dy) / (2 * Math.PI); // 0 at top, increasing clockwise
     if (ang < 0) ang += 1;
-    return {
-      u: (cell.cx - GEO.board.x) / GEO.board.w,
-      v: (cell.cy - GEO.board.y) / GEO.board.h,
-      rad: Math.hypot(dx, dy) / maxR,
-      angN: ang,
-    };
+    return { u: x01, v: y01, rad: Math.hypot(dx, dy) / Math.hypot(0.5, 0.5), angN: ang };
   };
 
-  const keys = kp.positions.map((pos, i) => {
-    const cell = pos ? cellAt(pos[0], pos[1]) : null;
-    const sp = cell ? spatial(cell) : { u: 0, v: 0, rad: 0, angN: 0 };
-    return { index: i, pos: cell ? pos : null, cell, ...sp, ringN: sp.angN };
-  });
-  const ug = up.positions.map((pos, i) => {
-    const cell = pos ? ugAt(pos[0], pos[1]) : null;
-    const sp = cell ? spatial(cell) : { u: 0, v: 0, rad: 0, angN: 0 };
-    return { index: i, pos: cell ? pos : null, cell, ...sp, ringN: cell ? cell.ring / UG_COUNT : 0 };
+  /* An LED's identity in this page is its LOGICAL index (keys) or its RING POSITION (underglow),
+   * never its strip index — because that is the space the config and the daemon both work in:
+   * `profiles[*].keys[].index` is logical, and the frame arrays posted to /api/preview/frame are
+   * logical for keys and ring-ordered for underglow (the daemon's transport translates to strip
+   * order itself, via the very mapping above). Both are pure functions of physical position, so
+   * correcting the wiring mapping never renumbers anything a user has coloured.
+   *
+   * `cells` was built row-major over populated slots, which IS the logical numbering. */
+  const keys = [];
+  for (let i = 0; i < Math.max(KEY_COUNT, cells.length); i++) {
+    const cell = cells[i] || null;
+    const sp = cell
+      ? spatial(nCols > 1 ? cell.gcol / (nCols - 1) : 0.5, nRows > 1 ? cell.row / (nRows - 1) : 0.5)
+      : { u: 0, v: 0, rad: 0, angN: 0 };
+    const pos = cell ? [cell.row, cell.col] : null;
+    keys.push({
+      index: i, pos, cell, ...sp, ringN: sp.angN,
+      strip: pos ? (keyPosToStrip.has(pos.join(',')) ? keyPosToStrip.get(pos.join(',')) : null) : null,
+    });
+  }
+  const ug = ugCells.map((cell, ring) => {
+    const pos = [cell.gx, cell.gy];
+    return {
+      index: ring, pos, cell, ...spatial(cell.gx / 2, cell.gy / 2), ringN: ring / UG_COUNT,
+      strip: ugPosToStrip.has(pos.join(',')) ? ugPosToStrip.get(pos.join(',')) : null,
+    };
   });
 
   const keyPosToIndex = new Map();
   keys.forEach((k) => { if (k.pos) keyPosToIndex.set(k.pos.join(','), k.index); });
   const ugPosToIndex = new Map();
-  ug.forEach((u) => { if (u.pos) ugPosToIndex.set(u.pos.join(','), u.index); });
+  ug.forEach((u) => { ugPosToIndex.set(u.pos.join(','), u.index); });
 
   const statusCells = [];
-  {
-    const total = STATUS_COUNT * GEO.status.w + (STATUS_COUNT - 1) * GEO.status.gap;
-    const sx = (GEO.vbW - total) / 2;
-    for (let i = 0; i < STATUS_COUNT; i++) {
-      const x = sx + i * (GEO.status.w + GEO.status.gap);
-      statusCells.push({ i, x, y: GEO.status.y, w: GEO.status.w, h: GEO.status.h, cx: x + GEO.status.w / 2, cy: GEO.status.y + GEO.status.h / 2 });
-    }
+  for (let i = 0; i < STATUS_COUNT; i++) {
+    const s = GEO.status, y = s.y + i * (s.h + s.gap);
+    statusCells.push({ i, x: s.x, y, w: s.w, h: s.h, cx: s.x + s.w / 2, cy: y + s.h / 2 });
   }
 
   state.geom = {
-    rows, cells, ugCells, statusCells, keys, ug, keyPosToIndex, ugPosToIndex,
-    provisionalKeys: kp.provisional, provisionalUg: up.provisional,
-    provKeys, provUg, align,
+    rows, gcols, nRows, nCols, cells, caps, capOf, ugCells, noCentre, featureCells, statusCells,
+    keys, ug, keyPosToIndex, ugPosToIndex, keyPosToStrip, ugPosToStrip,
+    defaultedKeys: kp.fromDefaults, defaultedUg: up.fromDefaults,
+    defKeys, defUg,
   };
   return state.geom;
+}
+
+/** One LED region of a shared cap, as a path.
+ *
+ *  The outer corners are rounded and the seam edge is left OPEN: an open subpath still fills
+ *  (the fill closes it) but a stroke traces only the segments actually drawn. So the two regions
+ *  paint independent colours while the strokes together outline exactly one keycap — no line down
+ *  the middle pretending they are separate caps. The seam gets its own hairline instead. */
+function capHalfPath(cap, cell) {
+  const r = GEO.key.r, x0 = cell.hx0, x1 = cell.hx1, y0 = cap.y, y1 = cap.y + cap.h;
+  const first = cell.capIndex === 0, last = cell.capIndex === cell.capCount - 1;
+  const arc = (sweep, x, y) => `A ${r},${r} 0 0 ${sweep} ${x},${y}`;
+  if (first && last) {  // a group of one: an ordinary rounded cap
+    return `M ${x0 + r},${y0} H ${x1 - r} ${arc(1, x1, y0 + r)} V ${y1 - r} ${arc(1, x1 - r, y1)} `
+      + `H ${x0 + r} ${arc(1, x0, y1 - r)} V ${y0 + r} ${arc(1, x0 + r, y0)} Z`;
+  }
+  if (first) {          // leftmost region: rounded left, open right
+    return `M ${x1},${y0} H ${x0 + r} ${arc(0, x0, y0 + r)} V ${y1 - r} ${arc(0, x0 + r, y1)} H ${x1}`;
+  }
+  if (last) {           // rightmost region: open left, rounded right
+    return `M ${x0},${y0} H ${x1 - r} ${arc(1, x1, y0 + r)} V ${y1 - r} ${arc(1, x1 - r, y1)} H ${x0}`;
+  }
+  // A cap covering three or more switches doesn't exist on this pad; draw a plain middle band.
+  return `M ${x0},${y0} H ${x1} V ${y1} H ${x0} Z`;
 }
 
 /* ====================================================== 8. frame renderer */
@@ -623,9 +780,40 @@ const frameToWire = (f) => ({
 
 const svgRefs = { keys: new Map(), ug: new Map(), status: [], glow: new Map() };
 
+/** Ghost glyph for a non-key control. Never focusable, never addressable, never selectable. */
+function featureGlyph(f) {
+  const g = svgEl('g', { class: `feat feat-${f.kind}`, 'aria-hidden': 'true' });
+  const cy = f.cy - 6, r = Math.min(f.w, f.h) / 2 - 5;
+  if (f.kind === 'encoder') {
+    g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r }));
+    g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r: r * 0.42 }));
+    g.append(svgEl('line', { class: 'feat-shape', x1: f.cx, y1: cy - r, x2: f.cx, y2: cy - r * 0.55 }));
+  } else if (f.kind === 'joystick') {
+    g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r }));
+    g.append(svgEl('circle', { class: 'feat-knob', cx: f.cx, cy, r: r * 0.34 }));
+    for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+      g.append(svgEl('line', {
+        class: 'feat-shape',
+        x1: f.cx + dx * r * 0.5, y1: cy + dy * r * 0.5,
+        x2: f.cx + dx * r * 0.82, y2: cy + dy * r * 0.82,
+      }));
+    }
+  } else {
+    const w = f.w - 12, h = Math.min(f.h - 16, 30);
+    g.append(svgEl('rect', { class: 'feat-shape feat-dash', x: f.cx - w / 2, y: cy - h / 2, width: w, height: h, rx: 7 }));
+    for (const k of [0.32, 0.6]) {
+      g.append(svgEl('circle', { class: 'feat-shape', cx: f.cx, cy, r: (h / 2) * k }));
+    }
+  }
+  const lab = svgEl('text', { class: 'feat-lab', x: f.cx, y: f.y + f.h - 2 });
+  lab.textContent = f.label;
+  g.append(lab);
+  return g;
+}
+
 function buildDevice() {
   const geom = buildGeometry();
-  const sig = JSON.stringify([geom.rows, geom.align]);
+  const sig = JSON.stringify([geom.rows, geom.gcols]);
   const svg = $('device');
   if (sig === state.geomSig && svg.childNodes.length) return;
   state.geomSig = sig;
@@ -645,37 +833,66 @@ function buildDevice() {
     svgRefs.glow.set(kind + ':' + id, r);
   };
 
-  // underglow first so it reads as sitting behind/around the keys
+  // Underglow first so it reads as sitting behind/around the keys. All 8 cells are identical in
+  // size and evenly spaced around the square — three across the top, one at each side midpoint,
+  // three across the bottom.
   for (const c of geom.ugCells) {
     const id = `${c.gx},${c.gy}`;
-    addGlow('ug', id, { x: c.x, y: c.y, width: c.w, height: c.h, rx: 12 });
+    addGlow('ug', id, { x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.ug.r });
     const g = svgEl('g', { class: 'cell-g', tabindex: 0, role: 'button', 'data-zone': 'underglow', 'data-pos': id });
-    const rect = svgEl('rect', { class: 'ug-cell', x: c.x, y: c.y, width: c.w, height: c.h, rx: 12 });
+    const rect = svgEl('rect', { class: 'ug-cell', x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.ug.r });
     const idx = svgEl('text', { class: 'cell-idx', x: c.cx, y: c.cy + 4 });
     g.append(rect, idx);
     svg.append(g);
     svgRefs.ug.set(id, { g, rect, idx, cell: c });
   }
 
-  // the missing centre of the 3x3 grid, called out explicitly
-  const cw = GEO.xEdges[2] - GEO.xEdges[1], ch = GEO.yEdges[2] - GEO.yEdges[1];
-  svg.append(svgEl('rect', { class: 'nocentre', x: GEO.xEdges[1] + 3, y: GEO.yEdges[1] + 3, width: cw - 6, height: ch - 6, rx: 12 }));
-  const nc = svgEl('text', { class: 'nocentre-t', x: GEO.vbW / 2, y: GEO.yEdges[2] - 6 });
-  nc.textContent = 'no centre underglow LED';
-  svg.append(nc);
+  // The absent 9th slot of the 3x3 grid, at the same size as the eight that exist. Drawn BEHIND
+  // the keys, because that is where it would be and where the underglow physically sits: the
+  // dashes show through the gap between the four middle caps. The caption below spells it out.
+  svg.append(svgEl('rect', {
+    class: 'nocentre', x: geom.noCentre.x, y: geom.noCentre.y,
+    width: geom.noCentre.w, height: geom.noCentre.h, rx: GEO.ug.r,
+  }));
 
-  for (const c of geom.cells) {
-    const id = `${c.row},${c.col}`;
-    addGlow('key', id, { x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.key.r });
-    const g = svgEl('g', { class: 'cell-g', tabindex: 0, role: 'button', 'data-zone': 'keys', 'data-pos': id });
-    const rect = svgEl('rect', { class: 'key-cell', x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.key.r });
-    const idx = svgEl('text', { class: 'cell-idx', x: c.cx, y: c.cy + 4 });
-    const lab = svgEl('text', { class: 'cell-lab', x: c.cx, y: c.cy + 12 });
-    g.append(rect, idx, lab);
-    svg.append(g);
-    svgRefs.keys.set(id, { g, rect, idx, lab, cell: c });
+  // The three non-key controls, so the board is recognisable as the real pad.
+  for (const f of geom.featureCells) svg.append(featureGlyph(f));
+
+  // Keycaps. One group per LED, but a shared cap is drawn as a single wide rounded cap: the
+  // regions carry their own colour and their own selection, and a hairline seam plus the shared
+  // index label say they are one control.
+  for (const cap of geom.caps) {
+    if (cap.shared) {
+      svg.append(svgEl('rect', {
+        class: 'cap-shell', x: cap.x, y: cap.y, width: cap.w, height: cap.h, rx: GEO.key.r,
+      }));
+    }
+    for (const c of cap.cells) {
+      const id = `${c.row},${c.col}`;
+      const gx = cap.shared ? c.hx0 : c.x, gw = cap.shared ? c.hx1 - c.hx0 : c.w;
+      addGlow('key', id, { x: gx, y: c.y, width: gw, height: c.h, rx: GEO.key.r });
+      const g = svgEl('g', { class: 'cell-g', tabindex: 0, role: 'button', 'data-zone': 'keys', 'data-pos': id });
+      const tx = gx + gw / 2;
+      const shape = cap.shared
+        ? svgEl('path', { class: 'key-cell key-half', d: capHalfPath(cap, c) })
+        : svgEl('rect', { class: 'key-cell', x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.key.r });
+      const idx = svgEl('text', { class: 'cell-idx', x: tx, y: c.cy + 4 });
+      const lab = svgEl('text', { class: 'cell-lab', x: tx, y: c.cy + 12 });
+      g.append(shape, idx, lab);
+      svg.append(g);
+      svgRefs.keys.set(id, { g, rect: shape, idx, lab, cell: c, cap });
+    }
+    if (cap.shared) {
+      for (const c of cap.cells.slice(1)) {
+        svg.append(svgEl('line', { class: 'cap-seam', x1: c.hx0, y1: cap.y + 6, x2: c.hx0, y2: cap.y + cap.h - 6 }));
+      }
+      const t = svgEl('text', { class: 'cap-t', x: cap.x + cap.w / 2, y: cap.y + cap.h + 11 });
+      t.textContent = 'one keycap, two LEDs';
+      svg.append(t);
+    }
   }
 
+  // Status LEDs: a vertical stack at the bottom-left, beside the touch pad.
   for (const c of geom.statusCells) {
     addGlow('st', String(c.i), { x: c.x, y: c.y, width: c.w, height: c.h, rx: GEO.status.r });
     const g = svgEl('g', { class: 'cell-g', tabindex: 0, role: 'button', 'data-zone': 'status', 'data-pos': String(c.i) });
@@ -685,19 +902,45 @@ function buildDevice() {
     svg.append(g);
     svgRefs.status.push({ g, rect, idx, cell: c });
   }
-  const st = svgEl('text', { class: 'zone-t', x: GEO.vbW / 2, y: GEO.vbH - 4 });
-  st.textContent = 'status LEDs — PWM duty 0-255, single colour';
-  svg.append(st);
+
+  const notes = [
+    { t: 'status LEDs — PWM duty 0-255, single colour', x: GEO.board.x, y: GEO.noteY[0], cls: 'zone-t start' },
+    { t: 'no centre underglow LED', x: GEO.board.x + GEO.board.w, y: GEO.noteY[0], cls: 'zone-t end' },
+  ];
+  for (const n of notes) {
+    const t = svgEl('text', { class: n.cls, x: n.x, y: n.y });
+    t.textContent = n.t;
+    svg.append(t);
+  }
 }
 
-/** Strip index shown on a physical position — the pending sweep map wins while identifying. */
+/** Logical indices of the OTHER LEDs under the same physical keycap as this position. */
+function capMateIndices(posKey) {
+  const cap = state.geom?.capOf?.get(posKey);
+  if (!cap || !cap.shared) return [];
+  return cap.cells
+    .map((c) => `${c.row},${c.col}`)
+    .filter((k) => k !== posKey)
+    .map((k) => indexAtPos('keys', k))
+    .filter((i) => i !== null);
+}
+
+/** The LED index at a physical position: logical for keys, ring position for underglow.
+ *  Pure geometry — independent of the strip wiring mapping, and what the config records. */
 function indexAtPos(zone, posKey) {
+  const m = zone === 'keys' ? state.geom.keyPosToIndex : state.geom.ugPosToIndex;
+  const v = m.get(posKey);
+  return v === undefined ? null : v;
+}
+
+/** The strip index wired to a physical position — the pending sweep map wins while identifying. */
+function stripAtPos(zone, posKey) {
   if (state.identify.active && state.identify.target === zone) {
     const list = state.identify.map[zone];
     const i = list.findIndex((p) => Array.isArray(p) && p.join(',') === posKey);
     return i === -1 ? null : i;
   }
-  const m = zone === 'keys' ? state.geom.keyPosToIndex : state.geom.ugPosToIndex;
+  const m = zone === 'keys' ? state.geom.keyPosToStrip : state.geom.ugPosToStrip;
   const v = m.get(posKey);
   return v === undefined ? null : v;
 }
@@ -706,42 +949,52 @@ function paint(frame) {
   const showIdx = $('chk-indices').checked;
   const showLab = $('chk-labels').checked;
   const sel = state.sel;
+  // A sweep is about strip numbering, so the board switches to it for the duration.
+  const sweeping = state.identify.active ? state.identify.target : null;
 
   for (const [id, ref] of svgRefs.keys) {
     const i = indexAtPos('keys', id);
+    const strip = stripAtPos('keys', id);
+    const shown = sweeping === 'keys' ? strip : i;
     const rgb = i === null ? [0.06, 0.07, 0.09] : frame.keys[i] || [0, 0, 0];
     const hex = '#' + rgbToHex(rgb);
     ref.rect.setAttribute('fill', hex);
     svgRefs.glow.get('key:' + id).setAttribute('fill', hex);
-    ref.idx.textContent = showIdx ? (i === null ? '—' : String(i)) : '';
+    ref.idx.textContent = showIdx || sweeping === 'keys' ? (shown === null ? '—' : String(shown)) : '';
     ref.idx.setAttribute('fill', inkFor(rgb));
     const entry = i === null ? null : keyEntry(i);
     ref.lab.textContent = showLab && entry && entry.label ? entry.label.slice(0, 12) : '';
     ref.lab.setAttribute('fill', inkFor(rgb));
     // keep the pair optically centred whether or not a label is showing
     ref.idx.setAttribute('y', ref.lab.textContent ? ref.cell.cy - 1 : ref.cell.cy + 4);
-    ref.g.dataset.unmapped = i === null ? '1' : '0';
+    ref.g.dataset.unmapped = strip === null ? '1' : '0';
     ref.g.dataset.sel = sel && sel.zone === 'keys' && sel.index === i ? '1' : '0';
+    const mates = capMateIndices(id);
     ref.g.setAttribute('aria-label',
-      `key at row ${ref.cell.row + 1} column ${ref.cell.col + 1}` +
-      (i === null ? ', no strip index mapped' : `, strip index ${i}`) +
+      `key at row ${ref.cell.row + 1}, grid column ${ref.cell.gcol + 1}` +
+      (i === null ? ', no LED index' : `, index ${i}`) +
+      (strip === null ? ', no strip index mapped' : `, strip index ${strip}`) +
       (entry && entry.label ? `, ${entry.label}` : '') +
+      (mates.length ? `, one wide keycap shared with index ${mates.join(' and ')}` : '') +
       `, colour ${rgbToHex(rgb)}`);
   }
 
   for (const [id, ref] of svgRefs.ug) {
     const i = indexAtPos('underglow', id);
+    const strip = stripAtPos('underglow', id);
+    const shown = sweeping === 'underglow' ? strip : i;
     const rgb = i === null ? [0.06, 0.07, 0.09] : frame.ug[i] || [0, 0, 0];
     const hex = '#' + rgbToHex(rgb);
     ref.rect.setAttribute('fill', hex);
     svgRefs.glow.get('ug:' + id).setAttribute('fill', hex);
-    ref.idx.textContent = showIdx ? (i === null ? '—' : String(i)) : '';
+    ref.idx.textContent = showIdx || sweeping === 'underglow' ? (shown === null ? '—' : String(shown)) : '';
     ref.idx.setAttribute('fill', inkFor(rgb));
-    ref.g.dataset.unmapped = i === null ? '1' : '0';
+    ref.g.dataset.unmapped = strip === null ? '1' : '0';
     ref.g.dataset.sel = sel && sel.zone === 'underglow' && sel.index === i ? '1' : '0';
     ref.g.setAttribute('aria-label',
       `underglow at grid x ${ref.cell.gx} y ${ref.cell.gy}` +
-      (i === null ? ', no strip index mapped' : `, strip index ${i}`) +
+      (i === null ? '' : `, ring position ${i}`) +
+      (strip === null ? ', no strip index mapped' : `, strip index ${strip}`) +
       `, colour ${rgbToHex(rgb)}`);
   }
 
@@ -989,10 +1242,25 @@ function selectLed(zone, index, pos) {
   if (state.lastFrame) paint(state.lastFrame);
 }
 
+/** The shared-keycap warning for a selected key, or '' when it has its own cap. */
+function sharedCapNote(index) {
+  const k = state.geom?.keys?.[index];
+  if (!k || !k.pos) return '';
+  const mates = capMateIndices(k.pos.join(','));
+  if (!mates.length) return '';
+  const list = mates.join(' and ');
+  return `One keycap, two switches: this LED and index ${list} sit under the single wide cap `
+    + 'in the bottom row. Colouring them separately is the point — a two-pixel gradient across one '
+    + 'cap. Binding them to different actions is not reliable, because nobody can choose which half '
+    + 'of the cap they press: treat the pair as one control (Phase 5 owns bindings).';
+}
+
 function renderColorPanel() {
   const sel = state.sel;
-  const nameEl = $('sel-name'), hintEl = $('sel-hint');
+  const nameEl = $('sel-name'), hintEl = $('sel-hint'), shEl = $('sel-shared');
   const keyBox = $('key-extra'), stBox = $('status-led-box');
+  shEl.hidden = true;
+  shEl.textContent = '';
 
   if (!sel) {
     nameEl.textContent = 'none';
@@ -1004,22 +1272,27 @@ function renderColorPanel() {
   }
   if (sel.zone === 'keys') {
     const entry = keyEntry(sel.index);
-    nameEl.textContent = `key · strip index ${sel.index}`;
-    hintEl.textContent = entry && entry.label
-      ? `“${entry.label}” — writes profiles.${state.profile}.keys[index ${sel.index}].color`
-      : `writes profiles.${state.profile}.keys[index ${sel.index}].color`;
+    const strip = state.geom?.keys?.[sel.index]?.strip;
+    nameEl.textContent = `key · index ${sel.index}`;
+    hintEl.textContent = (entry && entry.label ? `“${entry.label}” — ` : '')
+      + `writes profiles.${state.profile}.keys[index ${sel.index}].color`
+      + (strip === null || strip === undefined ? '' : ` · lit by per-key strip index ${strip}`);
     ceLed.setEnabled(true);
     ceLed.show(entry && isHex6(entry.color) ? entry.color : '000000');
     keyBox.hidden = false; stBox.hidden = true;
+    const note = sharedCapNote(sel.index);
+    if (note) { shEl.textContent = note; shEl.hidden = false; }
   } else if (sel.zone === 'underglow') {
-    nameEl.textContent = `underglow · strip index ${sel.index}`;
-    hintEl.textContent = 'The config stores one shared underglow base colour — edit it under “Base layer” below. Per-LED underglow colour comes from an effect.';
+    const strip = state.geom?.ug?.[sel.index]?.strip;
+    nameEl.textContent = `underglow · ring position ${sel.index}`;
+    hintEl.textContent = 'The config stores one shared underglow base colour — edit it under “Base layer” below. Per-LED underglow colour comes from an effect.'
+      + (strip === null || strip === undefined ? '' : ` This position is lit by underglow strip index ${strip}.`);
     ceLed.setEnabled(false);
     ceLed.show(isHex6(currentLighting()?.underglow) ? currentLighting().underglow : '000000');
     keyBox.hidden = true; stBox.hidden = true;
   } else {
     nameEl.textContent = `status LED ${sel.index}`;
-    hintEl.textContent = 'Single-colour LED: 8-bit PWM duty, no hue.';
+    hintEl.textContent = 'Single-colour LED beside the touch pad at the bottom-left: 8-bit PWM duty, no hue.';
     ceLed.setEnabled(false);
     keyBox.hidden = true; stBox.hidden = false;
   }
@@ -1236,7 +1509,7 @@ function renderEffectPanel() {
     if (e.palette && !allPalettes()[e.palette]) notes.push(`Palette “${e.palette}” is not in this config or the built-in corpus — the preview falls back to rainbow.`);
     if (!e.palette && !['rainbow', 'off'].includes(e.name)) notes.push('No palette set — the preview falls back to rainbow.');
     if (e.direction === 'ring' && e.target === 'keys') notes.push('Ring direction on the keys uses the angle around the pad centre.');
-    if (e.direction === 'ring' && state.geom?.provisionalUg) notes.push('Ring order is provisional until the underglow mapping is verified.');
+    if (e.direction === 'ring' && !mappingVerified()) notes.push('This config marks its underglow mapping unverified, so a ring chase may run in an unexpected order.');
   }
   $('eff-note').textContent = notes.join(' ');
 }
@@ -1253,11 +1526,17 @@ function mutateEffect(fn) {
 
 /* ================================================== 16. panels: identify */
 
+/* The sweep starts from the mapping currently in force — config overrides where present, the
+ * confirmed wiring order everywhere else — so the panel's job is confirming or correcting what
+ * the pad already does, not filling in blanks. */
 function seedIdentifyMap() {
+  const g = state.geom || buildGeometry();
   state.identify.map = {
-    keys: (state.config?.layout?.key_positions || []).slice(0, KEY_COUNT).map((p) => (Array.isArray(p) && p.length === 2 ? [p[0], p[1]] : null)),
-    underglow: (state.config?.layout?.underglow_positions || []).slice(0, UG_COUNT).map((p) => (Array.isArray(p) && p.length === 2 ? [p[0], p[1]] : null)),
+    keys: g.keys.slice(0, KEY_COUNT).map(() => null),
+    underglow: g.ug.slice(0, UG_COUNT).map(() => null),
   };
+  for (const k of g.keys) if (k.pos && k.strip !== null && k.strip < KEY_COUNT) state.identify.map.keys[k.strip] = k.pos.slice();
+  for (const u of g.ug) if (u.strip !== null && u.strip < UG_COUNT) state.identify.map.underglow[u.strip] = u.pos.slice();
   while (state.identify.map.keys.length < KEY_COUNT) state.identify.map.keys.push(null);
   while (state.identify.map.underglow.length < UG_COUNT) state.identify.map.underglow.push(null);
 }
@@ -1270,7 +1549,7 @@ function renderIdentifyPanel() {
   $('id-current').textContent = id.active ? `${id.target} index ${id.index}` : 'idle';
   $('btn-id-start').textContent = id.active ? 'Stop sweep' : 'Start sweep';
   for (const b of ['btn-id-prev', 'btn-id-next', 'btn-id-skip']) $(b).disabled = !id.active;
-  $('chk-verified').checked = !!state.config?.layout?.verified;
+  $('chk-verified').checked = mappingVerified();
 
   const body = $('id-table');
   body.textContent = '';
@@ -1296,10 +1575,17 @@ function renderIdentifyPanel() {
 
   const missing = list.slice(0, count).filter((p) => !p).length;
   const dupes = [...seen.values()].filter((v) => v > 1).length;
+  const def = id.target === 'keys' ? state.geom.defKeys : state.geom.defUg;
+  const sameAsDefault = list.slice(0, count).every((p, i) => p && def[i] && p.join(',') === def[i].join(','));
   const bits = [];
   if (missing) bits.push(`${missing} of ${count} indices unrecorded`);
   if (dupes) bits.push(`${dupes} position(s) claimed by more than one index`);
-  if (!state.daemonReachable) bits.push('No daemon: the sweep cannot light the pad, but you can still record a mapping by hand.');
+  if (!missing && !dupes) {
+    bits.push(sameAsDefault
+      ? 'This table matches the confirmed default wiring order — writing it just pins it explicitly into the config.'
+      : 'This table differs from the confirmed default wiring order — writing it overrides the default for this unit.');
+  }
+  if (!state.daemonReachable) bits.push('No daemon: the sweep cannot light the pad, but you can still edit the mapping by hand.');
   $('id-note').textContent = bits.join(' · ');
 }
 
@@ -1364,7 +1650,7 @@ function writeMapping() {
   if (wantVerified && missing.length) {
     toast(`Mapping written, but ${missing.join(' and ')} indices are still unrecorded — layout.verified stays false`, 'warn', 6500);
   } else {
-    toast(`Mapping written to layout${cfg.layout.verified ? ' and marked verified' : ''} — remember to Save`, 'ok');
+    toast(`Mapping written to layout as an override${cfg.layout.verified ? ' and marked verified' : ''} — remember to Save`, 'ok');
   }
 }
 
@@ -1416,22 +1702,23 @@ function renderBanner() {
   // flashing in for the starter config and then out again for the real one.
   if (!state.bootDone) return;
   slot.textContent = '';
-  const layout = state.config?.layout || {};
-  if (layout.verified === true) return;
+  // The shipped strip mapping is confirmed hardware, so silence is the normal state: this warns
+  // only when the config explicitly says "I overrode this and haven't checked it".
+  if (mappingVerified()) return;
   const g = state.geom;
   const which = [];
-  if (g?.provisionalKeys) which.push('per-key');
-  if (g?.provisionalUg) which.push('underglow');
-  const btn = el('button', { type: 'button', class: 'ghost small', text: 'Run identify sweep' });
+  if (!g?.defaultedKeys) which.push('per-key');
+  if (!g?.defaultedUg) which.push('underglow');
+  const btn = el('button', { type: 'button', class: 'ghost small', text: 'Open identify sweep' });
   btn.addEventListener('click', () => { showTab('identify'); $('btn-id-start').focus(); });
   slot.append(el('div', { class: 'banner', role: 'note' }, [
     el('span', { class: 'icon', text: '!', 'aria-hidden': 'true' }),
     el('div', {}, [
-      el('p', { html: '<strong>LED index mapping is not verified.</strong> <code>layout.verified</code> is false, so the positions shown here are a guess and spatial effects may land on the wrong LEDs.' }),
+      el('p', { html: '<strong>This config marks its LED index mapping unverified.</strong> <code>layout.verified</code> is <code>false</code>, so which strip index lights which LED may be wrong on this unit and spatial effects may land on the wrong pixels.' }),
       el('p', {
         text: which.length
-          ? `Using provisional defaults for the ${which.join(' and ')} mapping: per-key strip index 0→12 in reading order (rows of ${keyRows().join('/')}), underglow strip index 0→7 clockwise from the top-left. Short rows are drawn centred — which columns they occupy is also unknown.`
-          : 'A mapping is present in the config but has not been marked verified.',
+          ? `The ${which.join(' and ')} mapping comes from this config rather than the confirmed default. Run the sweep to check it against the pad, or clear the override to fall back to the shipped wiring order.`
+          : 'The mapping shown is the confirmed default wiring order; nothing in this config overrides it. Run the sweep to confirm it on this unit, then tick verified.',
       }),
       el('div', { class: 'b-actions' }, [btn]),
     ]),
@@ -1441,13 +1728,18 @@ function renderBanner() {
 function renderStageNote() {
   const g = state.geom;
   const bits = [];
-  const unplacedK = g.keys.filter((k) => !k.pos).map((k) => k.index);
-  const unplacedU = g.ug.filter((u) => !u.pos).map((u) => u.index);
   const total = g.cells.length;
+  const unstripped = g.keys.filter((k) => k.pos && k.strip === null).map((k) => k.index);
+  const capCount = g.caps.length;
+  const odd = g.rows.some((n, r) => (KEY_GRID_COLS[r] || []).length !== n);
   if (total !== KEY_COUNT) bits.push(`layout.key_rows sums to ${total}, not ${KEY_COUNT}.`);
-  if (unplacedK.length) bits.push(`per-key indices with no position: ${unplacedK.join(', ')}.`);
-  if (unplacedU.length) bits.push(`underglow indices with no position: ${unplacedU.join(', ')}.`);
-  if (!bits.length) bits.push(`${total} keys in rows of ${g.rows.join('/')}, 8 underglow positions in a 3x3 grid with no centre, 3 status LEDs.`);
+  if (odd) bits.push('layout.key_rows does not match the faceplate, so those rows are drawn left-aligned rather than at confirmed grid columns.');
+  if (unstripped.length) bits.push(`no strip index maps to key index ${unstripped.join(', ')} — check layout.key_positions.`);
+  if (!bits.length) {
+    bits.push(`${total} switches under ${capCount} keycaps on a 4×4 grid (rows of ${g.rows.join('/')}), `
+      + '8 equal underglow LEDs around the edge, 3 PWM status LEDs beside the touch pad. '
+      + 'Encoder, joystick and touch pad are drawn for orientation and carry no LED.');
+  }
   $('stage-note').textContent = bits.join(' ');
 }
 
@@ -1707,7 +1999,7 @@ function wireDeviceView() {
     if (state.identify.active && (zone === 'keys' || zone === 'underglow')) { recordIdentify(zone, posKey); return; }
     if (zone === 'status') { selectLed('status', Number(posKey), null); showTab('color'); return; }
     const i = indexAtPos(zone, posKey);
-    if (i === null) { toast('That position has no strip index mapped — use the identify sweep', 'warn'); return; }
+    if (i === null) { toast('That position has no LED index — check layout.key_rows', 'warn'); return; }
     selectLed(zone, i, posKey);
     showTab('color');
   };
@@ -1727,12 +2019,22 @@ function wireDeviceView() {
     ev.preventDefault();
     const zone = g.dataset.zone;
     if (zone === 'keys') {
-      const [r, c] = g.dataset.pos.split(',').map(Number);
-      const rows = state.geom.rows;
-      let nr = clamp(r + d[1], 0, rows.length - 1);
-      let nc = clamp(c + d[0], 0, rows[nr] - 1);
-      if (d[1] !== 0) nc = clamp(c, 0, rows[nr] - 1);
-      svgRefs.keys.get(`${nr},${nc}`)?.g.focus();
+      // Move across the 4x4 grid, skipping the slots the non-key controls occupy: left/right
+      // steps to the next switch in the row, up/down to the nearest grid column in the next row.
+      const [r, o] = g.dataset.pos.split(',').map(Number);
+      const cells = state.geom.cells;
+      const cur = cells.find((c) => c.row === r && c.col === o);
+      if (!cur) return;
+      let target = null;
+      if (d[0]) {
+        const inRow = cells.filter((c) => c.row === r).sort((a, b) => a.gcol - b.gcol);
+        target = inRow[inRow.indexOf(cur) + d[0]] || null;
+      } else {
+        const nr = clamp(r + d[1], 0, state.geom.rows.length - 1);
+        target = cells.filter((c) => c.row === nr).reduce((best, c) => (
+          !best || Math.abs(c.gcol - cur.gcol) < Math.abs(best.gcol - cur.gcol) ? c : best), null);
+      }
+      if (target) svgRefs.keys.get(`${target.row},${target.col}`)?.g.focus();
     } else if (zone === 'underglow') {
       const [gx, gy] = g.dataset.pos.split(',').map(Number);
       const cur = RING_ORDER.findIndex((p) => p[0] === gx && p[1] === gy);
@@ -1740,7 +2042,9 @@ function wireDeviceView() {
       const next = RING_ORDER[(cur + step + UG_COUNT) % UG_COUNT];
       svgRefs.ug.get(next.join(','))?.g.focus();
     } else {
-      const i = clamp(Number(g.dataset.pos) + (d[0] || 0), 0, STATUS_COUNT - 1);
+      // The status LEDs are a vertical stack, so up/down is the natural axis; left/right also
+      // works rather than trapping focus.
+      const i = clamp(Number(g.dataset.pos) + (d[1] || d[0]), 0, STATUS_COUNT - 1);
       svgRefs.status[i]?.g.focus();
     }
   });
@@ -2044,12 +2348,12 @@ function wireIdentifyPanel() {
     state.identify.map[state.identify.target][state.identify.index] = null;
     identifyStep(1);
   });
-  $('btn-id-provisional').addEventListener('click', () => {
+  $('btn-id-defaults').addEventListener('click', () => {
     const g = state.geom;
-    state.identify.map[state.identify.target] = (state.identify.target === 'keys' ? g.provKeys : g.provUg)
+    state.identify.map[state.identify.target] = (state.identify.target === 'keys' ? g.defKeys : g.defUg)
       .slice(0, identifyCount()).map((p) => (p ? p.slice() : null));
     renderIdentifyPanel();
-    toast('Filled with the provisional (unverified) mapping', 'warn');
+    toast('Reset to the confirmed default wiring order', 'ok');
   });
   $('btn-id-clear').addEventListener('click', () => {
     state.identify.map[state.identify.target] = new Array(identifyCount()).fill(null);
@@ -2110,16 +2414,6 @@ function wireChrome() {
     toast(`active_profile set to “${state.profile}”`, 'ok');
   });
 
-  $('sel-align').addEventListener('change', (ev) => {
-    // Purely a view preference: the config has nowhere to record it, and the col ordinals
-    // recorded by the identify sweep do not depend on it.
-    prefs.write('shortRowAlign', ev.target.value);
-    buildGeometry();
-    buildDevice();
-    renderStageNote();
-    if (state.lastFrame) paint(state.lastFrame);
-  });
-
   $('chk-indices').addEventListener('change', (ev) => { prefs.write('showIdx', ev.target.checked); if (state.lastFrame) paint(state.lastFrame); });
   $('chk-labels').addEventListener('change', (ev) => { prefs.write('showLab', ev.target.checked); if (state.lastFrame) paint(state.lastFrame); });
   $('chk-anim').addEventListener('change', (ev) => { state.anim.playing = ev.target.checked; prefs.write('anim', ev.target.checked); });
@@ -2150,7 +2444,6 @@ function init() {
   $('chk-labels').checked = prefs.read('showLab', false);
   $('chk-anim').checked = prefs.read('anim', true);
   state.anim.playing = $('chk-anim').checked;
-  $('sel-align').value = prefs.read('shortRowAlign', 'center');
 
   wireTabs();
   wireColorPanel();

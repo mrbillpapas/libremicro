@@ -30,10 +30,10 @@ but not editable here — that's Phase 5.
 | GET | `/api/schema` | fetched and kept for reference (not yet used for validation) |
 | GET | `/api/palettes` | built-in palette corpus; **replaces** the fallback set embedded in `app.js` |
 | GET | `/api/status` | status bar, polled every 3 s (8 s while unreachable) |
-| POST | `/api/preview/frame` | `{keys:[hex×13],underglow:[hex×8],status:[int×3],ttl:6}` on colour edits, throttled to `device.fps` |
+| POST | `/api/preview/frame` | `{keys:[hex×13],underglow:[hex×8],status:[int×3],ttl:6}` on colour edits, throttled to `device.fps`. `keys` is in **logical** order, `underglow` in **ring** order — see below |
 | POST | `/api/preview/effect` | `{effect:{…}}` on effect edits, debounced 140 ms |
 | POST | `/api/preview/stop` | `Stop preview`, and when a sweep ends |
-| POST | `/api/identify` | `{target:"keys"\|"underglow",index:int}` per sweep step |
+| POST | `/api/identify` | `{target:"keys"\|"underglow",index:int}` per sweep step — `index` is a **strip** index |
 | GET | `/api/export` | `Export` bundle download |
 | POST | `/api/import` | `Import` upload |
 
@@ -69,27 +69,56 @@ Contract notes for whoever is writing the daemon side:
   edits a local starter config and keeps the client-side preview, save reports the failure and
   suggests `Export`, and the identify sweep still lets a mapping be recorded by hand.
 
-## Provisional geometry (all of it labelled in the UI)
+## Geometry: one 4×4 grid, drawn as the faceplate has it
 
-`docs/HARDWARE.md` leaves three mappings unverified, so none of them is hardcoded as fact. The UI
-reads `layout.key_positions` / `layout.underglow_positions` when present and valid, and falls back
-per-index to these clearly-labelled provisional defaults:
+Every slot's physical position is **confirmed** (`docs/HARDWARE.md`, machine-readable in
+[`layout.py`](../daemon/libremicro/layout.py)), and this UI mirrors those constants rather than
+inventing geometry — `KEY_GRID_COLS`, `SHARED_KEYCAPS`, `FEATURES`, `UNDERGLOW_RING` and the two
+`DEFAULT_*_POSITIONS` tables all have a counterpart near the top of `app.js`.
 
-- **Per-key strip index → cap:** `0→12` in reading order, top row first, left to right.
-- **Underglow strip index → ring position:** `0→7` clockwise from the top-left of the 3×3 grid.
-  That order is also the traversal order for `direction: "ring"`.
-- **Short rows:** the 2-key and 3-key rows are drawn **centred** within the 4-column span. Which
-  matrix columns they actually populate is unknown, so the `Short rows` control in the stage
-  toolbar can redraw them left- or right-aligned. It is a view preference in `localStorage` only —
-  the schema has nowhere to record it, and it does not change what the sweep records.
+- **13 switches on a 4×4 grid**, rows of 2/4/4/3 at grid columns `(1,2)`, `(0,1,2,3)`,
+  `(0,1,2,3)`, `(1,2,3)`. Nothing is centred or aligned by guesswork, so there is no alignment
+  control any more.
+- **12 keycaps, not 13.** Logical keys 10 and 11 sit under the bottom row's single wide cap. It is
+  drawn as one cap — one outline, a hairline seam, both indices inside it — while each half keeps
+  its own colour and its own selection, because a two-pixel gradient across one cap is the point.
+  Selecting either half explains in the Colour panel why binding the halves separately is not
+  reliable. The grouping comes from the `SHARED_KEYCAPS` constant, not from hardcoded positions.
+- **Encoder `(0,0)`, joystick `(0,3)`, touch pad `(3,0)`** are drawn as ghost outlines for
+  orientation. They are not addressable LEDs, so they are not focusable, not clickable and not
+  selectable.
+- **8 underglow LEDs, all the same size**, evenly spaced around the square (3×3 minus centre):
+  three across the top, one at each side midpoint, three across the bottom. The absent centre slot
+  is drawn dashed at the same size, behind the caps — which is where the underglow physically is.
+- **3 PWM status LEDs** are a vertical stack at the bottom-left beside the touch pad, where they
+  physically sit. Still 0–255 duty, single colour, not RGB.
 
-Recorded key positions are `[row, col]` where `col` is the **ordinal within that physical row**
-(0-based, left to right), deliberately *not* the scan-matrix column. Underglow positions are
-`[x, y]`, 0–2 each, centre excluded.
+### Three numbering schemes, and which one the UI shows
 
-Whenever `layout.verified` is not `true`, a banner names which mappings are provisional and links
-to the sweep. `Write mapping to config` refuses to set `verified: true` while any index in either
-strip is unrecorded, and writes no array at all rather than an all-`null` one.
+- **Logical index** (keys `0–12`, row-major over populated slots) and **ring position**
+  (underglow `0–7`, clockwise from top-left) are what the board labels and what selection uses.
+  This is the config's contract — `profiles[*].keys[].index` is logical — and it is also the space
+  the daemon's frame arrays use: `/api/preview/frame` takes `keys` in logical order and
+  `underglow` in ring order, and the daemon's transport translates to strip order itself. Both are
+  pure functions of physical position, so re-recording the wiring never renumbers a user's colours.
+- **Strip index** (`k <i>` / `u <i>` on the wire) is wiring detail. It is shown in the Colour
+  panel's hint, in every LED's accessible name, in the Identify table, and on the board *while a
+  sweep is running* — the one context where strip numbering is the subject.
+- The confirmed wiring order ships as the default: per-key strip index `0` is the **bottom-right**
+  key and the chain snakes upward (row 3 right-to-left, row 2 left-to-right, …); underglow starts
+  bottom-right and runs around the ring. `layout.key_positions` /
+  `layout.underglow_positions` override it per index when present and valid.
+
+Recorded positions stay `[row, ordinal-within-row]` for keys — the ordinal, deliberately neither
+the scan-matrix column nor the 4×4 grid column (the grid column is *derived* from it for drawing,
+exactly as `layout.grid_col()` does) — and `[x, y]` 0–2 for underglow, centre excluded.
+
+The Identify sweep is therefore **confirmation, not setup**: its table starts from the mapping in
+force, `Reset to confirmed default` restores the shipped order, and `Write mapping to config`
+stores an explicit override. It still refuses to set `verified: true` while any index is
+unrecorded, and writes no array at all rather than an all-`null` one. The warning banner appears
+**only when a config explicitly sets `layout.verified: false`** — i.e. someone overrode the
+mapping and hasn't checked it — not merely because the key is absent.
 
 ## Colour and effects
 
@@ -100,13 +129,19 @@ sampled through the same code rather than left to the browser's sRGB lerp. The `
 and effect are generated from equal-lightness OKLCh hues rather than hand-picked hexes.
 
 All ten schema effects render client-side from each LED's normalised position on the board
-(`u`, `v`, radius, ring angle), so the preview works with no device attached and spatial effects
-follow whatever mapping the config declares.
+(`u`, `v`, radius, ring angle), so the preview works with no device attached. Those coordinates use
+the **same normalisation the daemon uses** — grid position over grid extent, as in
+`layout.key_xy()` / `underglow_xy()`, not pixels in the SVG — so a gradient previewed here is the
+gradient the device renders.
 
 ## Keyboard and accessibility
 
-- Tab into the device view; every LED is a focusable button. Arrow keys move within a zone,
-  Enter/Space selects (or records a position mid-sweep).
+- Tab into the device view; every LED is a focusable button — and only LEDs are, so the encoder,
+  joystick and touch pad ghosts are skipped entirely. Arrow keys move within a zone: across the 4×4
+  key grid (stepping over the slots the non-key controls hold, and between the two halves of the
+  wide cap), around the underglow ring, up and down the status stack. Enter/Space selects (or
+  records a position mid-sweep). Each LED's accessible name carries its row and grid column, its
+  logical index, its strip index, and — for the wide cap — the index it shares a keycap with.
 - Tabs are a proper tablist: arrows, Home/End.
 - Palette stop handles are buttons; arrows nudge position by 0.01 (0.05 with Shift).
 - `Cmd/Ctrl+S` saves. Unsaved changes prompt before leaving.

@@ -61,7 +61,7 @@
     },
 
     "layout": {
-      "description": "Physical geometry of the LEDs. See docs/HARDWARE.md — the strip-index-to-physical-position mappings are NOT yet verified, which is why they live here as data rather than in source. Use the web UI's identify sweep to confirm them, then set verified: true.",
+      "description": "Physical geometry of the LEDs. The strip-index-to-physical-position mapping is CONFIRMED on hardware (a serpentine starting at the bottom-right — see docs/HARDWARE.md) and ships as a built-in default, because every Creator Micro 2 is wired identically. Everything here is therefore optional: supply it only to override the default for a unit that differs, and set verified: false alongside an override you haven't checked.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -94,8 +94,8 @@
           }
         },
         "verified": {
-          "description": "Set true once the mappings above have been confirmed against the physical device.",
-          "type": "boolean", "default": false
+          "description": "Whether the mapping in use has been confirmed against the physical device. Defaults to true, because the shipped default IS confirmed. Set it false only when supplying an override you haven't checked — that's what re-enables the 'unverified mapping' warning in the web UI.",
+          "type": "boolean", "default": true
         }
       }
     },
