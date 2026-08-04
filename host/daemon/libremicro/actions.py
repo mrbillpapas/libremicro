@@ -104,9 +104,14 @@ class Actions:
 
     def __init__(self, on_profile=None, on_reload=None,
                  volume_step: int = VOLUME_STEP_DEFAULT,
-                 volume_mode: str = VOLUME_MODE_DEFAULT):
+                 volume_mode: str = VOLUME_MODE_DEFAULT,
+                 on_level=None):
         self._on_profile = on_profile
         self._on_reload = on_reload
+        # Called with (fraction 0..1, label) whenever a level changes, so the daemon can show
+        # it somewhere. macOS gives no overlay for a programmatic volume set, and a dial with
+        # no feedback feels broken — the pad's own underglow is the answer.
+        self._on_level = on_level
         self._lock = threading.Lock()
         self.volume_step = volume_step
         self.volume_mode = volume_mode
@@ -258,7 +263,13 @@ class Actions:
         script = f"set volume output volume {level}"
         if direction > 0:
             script += " without output muted"
-        return self._spawn(["osascript", "-e", script], what="set volume")
+        result = self._spawn(["osascript", "-e", script], what="set volume")
+        if result and self._on_level is not None:
+            try:
+                self._on_level(level / 100.0, "volume")
+            except Exception:
+                pass          # feedback must never be able to break the action itself
+        return result
 
     def _read_volume(self) -> int | None:
         try:

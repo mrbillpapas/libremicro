@@ -50,6 +50,9 @@ class Renderer:
         self._preview: Frame | None = None
         self._preview_until = 0.0
         self._preview_effect: effects.Effect | None = None
+        # A transient level bar — volume, brightness, anything 0..1. Drawn on the underglow
+        # ring, which is the one zone that reads as a scale rather than a set of buttons.
+        self._bar: tuple[float, float, RGB] | None = None   # (until, fraction, colour)
 
         self._last_activity = time.monotonic()
         self._dim_level = 1.0
@@ -110,6 +113,21 @@ class Renderer:
             rgb = parse_hex(color) if isinstance(color, str) else color
             self._pulses[int(logical_index)] = (rgb, max(0.2, period))
 
+    def bar(self, fraction: float, color: str | RGB = "ffffff",
+            seconds: float = 1.6) -> None:
+        """Show a transient level bar across the underglow.
+
+        This exists because macOS shows no on-screen overlay when volume is set
+        programmatically, and a dial with no feedback feels broken. The pad is sitting right
+        under the user's hand, so it is a better place for the indicator than the screen —
+        and with 8 segments plus a partially-lit leading segment the resolution is finer than
+        the eight steps would suggest.
+        """
+        rgb = parse_hex(color) if isinstance(color, str) else color
+        with self._lock:
+            self._bar = (time.monotonic() + max(0.1, seconds),
+                         max(0.0, min(1.0, float(fraction))), rgb)
+
     def note_activity(self) -> None:
         with self._lock:
             self._last_activity = time.monotonic()
@@ -135,6 +153,7 @@ class Renderer:
             self._preview_effect = None
             self._preview_until = 0.0
             self._hold_until = 0.0
+            self._bar = None
 
     def hold(self, seconds: float) -> None:
         """Stop writing frames entirely for `seconds`, leaving the strips as they are.
@@ -203,6 +222,28 @@ class Renderer:
             if self._effect is not None:
                 layer = self._effect.render(now - self._effect_t0, self.cfg.layout)
                 frame = frame.composite(layer, self._effect.blend, self._effect.target)
+
+            bar = self._bar
+            if bar is not None:
+                until, fraction, colour = bar
+                if now >= until:
+                    self._bar = None
+                else:
+                    # Fade the whole bar out over its last 0.4s so it doesn't just vanish.
+                    fade = min(1.0, (until - now) / 0.4)
+                    exact = fraction * UNDERGLOW_N
+                    full = int(exact)
+                    for i in range(UNDERGLOW_N):
+                        if i < full:
+                            level = 1.0
+                        elif i == full:
+                            level = exact - full      # the partially-lit leading segment
+                        else:
+                            level = 0.0
+                        lit = scale_lightness(colour, level * fade)
+                        # Unlit segments keep a dim trace of the colour so the bar reads as a
+                        # scale with a track, not a handful of disconnected dots.
+                        frame.under[i] = lit if level > 0.02 else scale_lightness(colour, 0.05 * fade)
 
             for idx, (colour, period) in self._pulses.items():
                 if 0 <= idx < KEY_N:

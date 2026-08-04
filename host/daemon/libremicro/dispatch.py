@@ -41,12 +41,19 @@ class Dispatcher:
         self.actions = Actions(on_profile=self.switch_profile,
                                on_reload=self._reload,
                                volume_step=int(self.cfg.device.get("volume_step", 3)),
-                               volume_mode=str(self.cfg.device.get("volume_mode", "fine")))
+                               volume_mode=str(self.cfg.device.get("volume_mode", "fine")),
+                               on_level=self._show_level)
         self.recognizer = events.Recognizer(
             emit=self.handle, is_bound=self.is_bound,
             hold_ms=int(self.cfg.device.get("hold_ms", events.DEFAULT_HOLD_MS)),
             double_ms=int(self.cfg.device.get("double_ms", events.DEFAULT_DOUBLE_MS)),
         )
+
+    def _show_level(self, fraction: float, label: str = "") -> None:
+        """Put a level change on the pad. Colour is per-label so volume and brightness are
+        distinguishable at a glance."""
+        colour = {"volume": "3aa0ff", "brightness": "ffc04a"}.get(label, "ffffff")
+        self.d.renderer.bar(fraction, colour)
 
     # --- context ------------------------------------------------------------
 
