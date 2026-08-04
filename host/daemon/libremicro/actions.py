@@ -241,15 +241,25 @@ class Actions:
         except ImportError as exc:
             _warn_once("keys-import", f"keyboard synthesis unavailable: {exc}")
             return None
-        caps = getattr(keys, "capabilities", None)
-        if callable(caps):
+        probe = getattr(keys, "available", None)
+        if callable(probe):
             try:
-                state = caps() or {}
-            except Exception:
-                state = {}
-            if state and not state.get("available", True):
-                _warn_once("keys-caps", f"keyboard synthesis unavailable: "
-                                        f"{state.get('reason', 'helper not ready')}")
+                if not probe():
+                    caps = getattr(keys, "capabilities", lambda: {})() or {}
+                    if not caps.get("built"):
+                        detail = ("native helper not built — run "
+                                  "swiftc -O -o lmkey lmkey.swift in host/swift/")
+                    elif not caps.get("accessibility"):
+                        # TCC attributes trust to the *responsible* process, so the entry to
+                        # grant is the terminal or launchd job running the daemon, not lmkey.
+                        detail = ("macOS Accessibility permission not granted to the app "
+                                  "running this daemon (Terminal/iTerm, or the launchd job)")
+                    else:
+                        detail = "helper not ready"
+                    _warn_once("keys-caps", f"keyboard synthesis unavailable: {detail}")
+                    return None
+            except Exception as exc:
+                _warn_once("keys-probe", f"keyboard synthesis probe failed: {exc}")
                 return None
         return keys
 
