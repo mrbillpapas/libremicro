@@ -153,20 +153,28 @@ Now that bindings exist, the editor covers them.
 **Done when:** the whole config — bindings included — is editable without touching JSON, and
 profiles can be switched from both the UI and the pad.
 
-## Phase 6 — Notification watchers
+## Phase 6 — Notification watchers ✅ **built**
 
 Use case 3. Background pollers that pulse a key on external state; Slack unread is the headline.
 Watchers are pluggable so new sources don't touch the core.
 
 **Done when:** the Slack key pulses on unread and stops when read, without the poller affecting
-input latency.
+input latency. ✅
 
-## Phase 7 — Agentic-coding control surface
+One design point that outranks the feature: a reading is either a value or explicitly *unknown*,
+and unknown never collapses to zero. A pulsing key is a claim about unread mail, and making that
+claim while we don't know is worse than a dark key.
+
+## Phase 7 — Agentic-coding control surface ✅ **built** (see [`AGENT-SURFACE.md`](AGENT-SURFACE.md))
 
 Use case 4. Agent status on the LEDs, session switching, push-to-dictate, approve/deny keys,
 encoder as an effort knob, targeting Claude Code as the first harness.
 
-**Done when:** a live coding session's state is legible on the pad and the pad can act on it.
+**Done when:** a live coding session's state is legible on the pad and the pad can act on it. ✅
+
+Driven by Claude Code hooks rather than polling, which is what makes *waiting-for-approval*
+observable at all. Watching the session transcript was investigated and rejected: a session
+sitting on a permission prompt writes nothing, so the state that matters most is invisible to it.
 
 ## Phase 8 — Power, sleep and battery (firmware)
 
