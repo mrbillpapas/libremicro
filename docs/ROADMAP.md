@@ -6,10 +6,39 @@ isn't blocked.
 
 ## Start here
 
-**The one thing blocking everything: flash firmware v2.** It's written and compiles; a human
-needs to flash it and check the key orientation. Until then every binding is exercised through
-`POST /api/simulate` rather than by touching the pad. See Phase 2 for the verification order and
-the boot-loop caveat.
+Three things need a human, in this order.
+
+**1. Flash firmware v2.** It's written and compiles; nothing else can proceed without it.
+Until it's flashed, bindings only fire from `POST /api/simulate`, never from the pad.
+
+```bash
+P=$(./scripts/enter_bootloader.sh)
+./.venv/bin/esptool --port "$P" --chip esp32s3 write-flash 0x10000 firmware/.pio/build/cm2/firmware.bin
+```
+
+Then verify in this order: LEDs still light → each key gives exactly one `down` and one `up`
+→ **the orientation** (top-left should report `key 0`, bottom-right `key 12`). The web UI's
+event feed shows what arrived. If it's transposed, fix `MTX_TO_LOGICAL` in `firmware/src/main.c`
+— that's the one assumption left in the key path. Keep [`RECOVERY.md`](RECOVERY.md) open;
+`firmware/README.md` records a boot-loop on an earlier revision.
+
+The encoder, touch pad and rear button are behind `LM_ENABLE_UNVERIFIED_INPUTS`, off by
+default. Their pins are now confirmed ([`PIN-VERIFICATION.md`](PIN-VERIFICATION.md)), but read
+the GPIO 2 hazards in [`HARDWARE.md`](HARDWARE.md) first — stock's rear-button rescue arms a ULP
+watcher that resets the device on a rear press, and our own flashing procedure is what arms it.
+
+**2. Grant two macOS permissions**, both to whatever launches the daemon (Terminal/iTerm, or the
+launchd job) rather than to the daemon or its helpers — macOS attributes them to the responsible
+process. Without these, shortcut bindings and notification watchers silently do nothing:
+
+- **Accessibility** — needed for keyboard synthesis and for reading Dock badges.
+- **Automation → System Events** — needed for the watchers' Dock query.
+
+`GET /api/status` reports both under `keys`, and the web UI warns up front.
+
+**3. Confirm the matrix orientation and bind your keys.** The LED mapping is already confirmed
+and shipped; the input side is the remaining unknown, and pressing each key with the event feed
+open is how it gets settled.
 
 ## Where we actually are
 

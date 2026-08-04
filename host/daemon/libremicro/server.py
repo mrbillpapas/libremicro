@@ -67,7 +67,21 @@ class Api:
             "battery": d.battery,
             "input_events": d.link.saw_input_event,
             "keys": self._key_capabilities(),
+            # None means the connected firmware didn't answer `ver` — i.e. it's v1, LED-out
+            # only. That's the difference between "press a key and nothing happens because
+            # you haven't bound it" and "because this firmware can't report presses".
+            "firmware": d.link.firmware,
+            "watchers": self._watcher_state(),
         }
+
+    def _watcher_state(self) -> list | None:
+        probe = getattr(self.daemon, "watchers", None)
+        if probe is None:
+            return None
+        try:
+            return probe.state()
+        except Exception:
+            return None
 
     def _key_capabilities(self) -> dict:
         """Whether keyboard synthesis will actually work, so the UI can warn up front rather
