@@ -42,10 +42,15 @@ MEDIA_ACTIONS = {
 #: Volume has two implementations with a genuine trade between them, so it's a config choice
 #: rather than a decision made on the user's behalf:
 #:
-#:   "fine"   (default) sets the level directly. Any step size you like — device.volume_step,
-#:            default 3% — but macOS shows no volume overlay for a programmatic set.
-#:   "coarse" presses the real media key. You get the overlay, but macOS snaps to its own
-#:            16-step grid, ~6.25% a press, which is chunky under a rotary dial.
+#:   "coarse" (default) presses the real media key, so macOS shows its own volume slider.
+#:            The cost is macOS's 16-step grid, ~6.25% a press, which is chunky under a dial —
+#:            but seeing the level move matters more than resolution.
+#:   "fine"   sets the level directly. Any step size you like via device.volume_step, but
+#:            macOS shows NO overlay for a programmatic set.
+#:
+#: Either way the pad shows its own bar across the underglow, so there is feedback even in
+#: fine mode. In coarse mode that costs one extra volume read to learn where the level landed,
+#: which is why it happens after the key is sent rather than before.
 #:
 #: What is NOT on offer, despite being the obvious idea: the media key with shift+option
 #: held, which is how a human gets quarter steps. Measured on hardware, that does nothing for
@@ -53,7 +58,7 @@ MEDIA_ACTIONS = {
 #: injected aux event — and putting the modifiers onto the event itself latches the key, which
 #: then auto-repeats and drives volume to a rail. See host/swift/lmkey.swift.
 VOLUME_STEP_DEFAULT = 3
-VOLUME_MODE_DEFAULT = "fine"
+VOLUME_MODE_DEFAULT = "coarse"
 
 _VOL_GET = 'output volume of (get volume settings)'
 _VOL_MUTED = 'output muted of (get volume settings)'
@@ -199,8 +204,19 @@ class Actions:
                 keys = self._keys()
                 if keys is None:
                     return Result(False, "key synthesis unavailable")
-                return Result(bool(keys.send_media(
-                    "vol_up" if direction > 0 else "vol_down")))
+                ok = keys.send_media("vol_up" if direction > 0 else "vol_down")
+                if ok and self._on_level is not None:
+                    # macOS picked the level, so read it back rather than guessing, and show
+                    # it on the pad too. Cached so a fast spin isn't one read per detent.
+                    level = self._read_volume()
+                    if level is not None:
+                        with self._lock:
+                            self._volume, self._volume_at = level, time.monotonic()
+                        try:
+                            self._on_level(level / 100.0, "volume")
+                        except Exception:
+                            pass
+                return Result(bool(ok))
             return self.nudge_volume(direction)
 
         if token in MEDIA_ACTIONS:

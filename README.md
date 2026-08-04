@@ -12,6 +12,13 @@ Open custom firmware and host tooling for the **Work Louder Creator Micro 2** (C
 macropad — turning it into a fully programmable, AI-native control surface with individually
 addressable per-key RGB.
 
+> **The host side is macOS only.** The firmware is plain ESP-IDF and portable, and the
+> serial protocol is just ASCII lines, so a Linux or Windows host is a realistic port — but
+> nothing has been written or tested for either. Everything that touches the operating system
+> is Apple-specific today: keyboard and media synthesis via CGEvent, app launching via
+> `open -a`, AppleScript, and reading Dock badges for notification watchers. See
+> [Porting](#porting).
+
 > **Not affiliated with, endorsed by, or supported by Work Louder.** "Work Louder" and
 > "Creator Micro" are their trademarks, used here only to describe device compatibility.
 > This is an independent interoperability project for hardware you own. Flashing custom
@@ -115,6 +122,23 @@ To go back to stock, see [docs/RECOVERY.md](docs/RECOVERY.md).
 ESP32-S3-WROOM-1 (N16R8). All eFuses ship unlocked — no Secure Boot, no flash encryption —
 so custom firmware boots without circumventing any protection. Full pin map and the LED
 power-rail details are in [docs/HARDWARE.md](docs/HARDWARE.md).
+
+## Porting
+
+The split is deliberate and it is what makes a port tractable: the device speaks
+newline-delimited ASCII over USB serial (`docs/PROTOCOL.md`) and knows nothing about apps,
+shortcuts or notifications. Everything OS-specific is on the host, and it is concentrated:
+
+| Piece | What it uses | Portability |
+|---|---|---|
+| `host/swift/lmkey.swift` | CGEvent / NSEvent | needs a per-OS equivalent (e.g. `libevdev`/`uinput`, `SendInput`) |
+| `actions.py` launch/AppleScript | `open -a`, `osascript` | swap for `xdg-open` / `Start-Process` |
+| `actions.py` volume | media keys or `osascript` | swap for PulseAudio/WirePlumber or the Windows mixer |
+| `watchers.py` | Dock badge via Accessibility | needs a different unread source entirely |
+| everything else | pure Python | already portable |
+
+The lighting engine, effects, palettes, config, schema, dispatch, HTTP API and web UI have no
+Apple dependency at all. A port is mostly `keys.py` plus a handful of action implementations.
 
 ## License
 

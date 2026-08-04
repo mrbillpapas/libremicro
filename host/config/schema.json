@@ -104,13 +104,13 @@
           "default": 3
         },
         "volume_mode": {
-          "description": "How vol_up/vol_down work. 'fine' sets the level directly, giving any step size you like via volume_step, but macOS shows no volume overlay for a programmatic set. 'coarse' presses the real media key: you get the overlay, but macOS snaps to its own 16-step grid (~6.25% a press), which is chunky under a dial. The obvious third option \u2014 media key with shift+option held, the way a human gets quarter steps \u2014 does not work for synthesised events and is not offered.",
+          "description": "How vol_up/vol_down work. 'coarse' (default) presses the real media key so macOS shows its volume slider; the cost is macOS's own 16-step grid, ~6.25% a press. 'fine' sets the level directly for any step size via volume_step, but macOS shows no overlay for a programmatic set. Either way the pad shows a bar across its underglow. Note the obvious third option \u2014 media key with shift+option held, the way a human gets quarter steps \u2014 does NOT work for synthesised events and is not offered.",
           "type": "string",
           "enum": [
             "fine",
             "coarse"
           ],
-          "default": "fine"
+          "default": "coarse"
         }
       }
     },

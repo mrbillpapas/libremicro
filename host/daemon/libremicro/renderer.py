@@ -128,6 +128,11 @@ class Renderer:
             self._bar = (time.monotonic() + max(0.1, seconds),
                          max(0.0, min(1.0, float(fraction))), rgb)
 
+    def effective_brightness(self) -> int:
+        """Brightness actually being applied, idle dimming included — so a mirror of the pad
+        can dim with it instead of showing a brighter pad than the one on the desk."""
+        return max(0, min(255, round(self.cfg.brightness * self._dim_level)))
+
     def note_activity(self) -> None:
         with self._lock:
             self._last_activity = time.monotonic()

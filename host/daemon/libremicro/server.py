@@ -54,6 +54,20 @@ class Api:
         return {"events": events, "latest_seq": latest,
                 "input_events_seen": self.daemon.link.saw_input_event}
 
+    def get_frame(self) -> dict:
+        """The frame the daemon is putting on the device RIGHT NOW.
+
+        This exists so the web UI can mirror the pad rather than re-implementing every effect
+        in JavaScript and hoping the two agree. A second implementation of the same animation
+        will always drift — different clock, different rounding, different notion of when a
+        cycle started — so the honest way to show what the pad is doing is to ask.
+        """
+        frame = self.daemon.renderer.compose()
+        out = frame.to_hex()
+        out["brightness"] = self.daemon.renderer.effective_brightness()
+        out["connected"] = self.daemon.link.connected
+        return out
+
     def get_status(self) -> dict:
         d = self.daemon
         return {
@@ -237,6 +251,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/palettes": self.api.get_palettes,
             "/api/status": self.api.get_status,
             "/api/export": self.api.export,
+            "/api/frame": self.api.get_frame,
         }
         if path in routes:
             self._json(200, routes[path]())

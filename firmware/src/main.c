@@ -2,7 +2,7 @@
 // and the 8 underglow LEDs.
 //
 // ROOT CAUSE OF THE OLD "LEDs never light" BLOCKER (found by disassembling stock
-// v0.6.1; addresses in ~/AI/worklouder/HANDOFF.md):
+// v0.6.1; see docs/PIN-VERIFICATION.md and docs/HARDWARE.md for the addresses):
 //
 //   1. The addressable-LED VDD rail is gated by GPIO 36/37/38 (top-board power),
 //      driven by wl_io::init_top_board_power_gpio (0x42008f38) to 37=1,36=0,38=1
