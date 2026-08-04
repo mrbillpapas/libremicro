@@ -7,10 +7,16 @@ given string and disassemble it.
 Merged flash layout (from the on-device partition table):
   0x000000 bootloader | 0x008000 partition table | 0x010000 factory app
 """
+import os
 import struct
 import sys
 
-MERGED = "/Users/billpapas/AI/worklouder/firmware/firmware_v0.6.1_merged.bin"
+MERGED = os.environ.get("LM_VENDOR_FW", "")
+if not MERGED or not os.path.isfile(MERGED):
+    raise SystemExit(
+        "Set LM_VENDOR_FW to a vendor firmware image, e.g.\n"
+        "  LM_VENDOR_FW=~/path/firmware_v0.6.1_merged.bin python3 " + os.path.basename(__file__) + "\n"
+        "This repo deliberately ships no vendor firmware — see tools/README.md.")
 APP_OFF = 0x10000
 
 data = open(MERGED, "rb").read()

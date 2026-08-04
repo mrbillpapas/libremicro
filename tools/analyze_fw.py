@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Search the stock CM2 firmware image for RPC method strings, esp. per-key lighting."""
+import os
 import re
 import sys
 
-FW = "/Users/billpapas/AI/worklouder/firmware/firmware_v0.6.1_merged.bin"
+FW = os.environ.get("LM_VENDOR_FW", "")
+if not FW or not os.path.isfile(FW):
+    raise SystemExit(
+        "Set LM_VENDOR_FW to a vendor firmware image, e.g.\n"
+        "  LM_VENDOR_FW=~/path/firmware_v0.6.1_merged.bin python3 " + os.path.basename(__file__) + "\n"
+        "This repo deliberately ships no vendor firmware — see tools/README.md.")
 data = open(FW, "rb").read()
 print(f"image: {len(data)} bytes\n")
 

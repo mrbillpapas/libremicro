@@ -34,3 +34,6 @@ efuse_summary.txt
 
 # Built Swift helper symlinked for scripts/
 scripts/wlrpc
+
+# Vendor-derived output from tools/extract_sources.py — NEVER commit.
+extracted-src/

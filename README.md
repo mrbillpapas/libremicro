@@ -9,6 +9,13 @@ addressable per-key RGB.
 > This is an independent interoperability project for hardware you own. Flashing custom
 > firmware will void your warranty. See [docs/RECOVERY.md](docs/RECOVERY.md) to restore stock.
 
+![The LibreMicro web UI: a layout-accurate view of the pad with the underglow drawn as eight
+segments tiling the perimeter, alongside the binding editor](docs/images/webui.png)
+
+*The local web UI. The pad is drawn to its real geometry — 13 switches under 12 keycaps on a 4×4
+grid, eight underglow LEDs tiling the whole perimeter, and the encoder, joystick and touch pad
+shown for orientation. Everything edits one JSON document.*
+
 ## Why
 
 The vendor firmware exposes only two whole-zone colours over its RPC. The CM2's hardware

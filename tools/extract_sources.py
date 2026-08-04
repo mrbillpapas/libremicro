@@ -6,7 +6,7 @@ import pathlib
 
 KIT = ("/Applications/input.app/Contents/Resources/app.asar.unpacked"
        "/node_modules/@worklouder/wl-device-kit/dist")
-OUT = pathlib.Path("/Users/billpapas/AI/worklouder/wl-device-kit-src")
+OUT = pathlib.Path(os.environ.get("LM_EXTRACT_OUT", "extracted-src"))
 
 for mapname in ("index.js.map", "browser_safe.js.map"):
     p = os.path.join(KIT, mapname)

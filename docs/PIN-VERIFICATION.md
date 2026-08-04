@@ -652,7 +652,7 @@ scratchpad. What I would fold in:
 1. **`tools/fwlib.py` — a shared image module.** `map_image.py`, `disasm.py` and
    `find_l32r.py` each re-parse the merged image and each hard-code the *same* single firmware
    path, and `disasm.py` hard-codes an `objdump` path
-   (`/Users/billpapas/AI/worklouder/tools/xtensa-esp-elf/...`) that does not exist on this
+   (a hard-coded `tools/xtensa-esp-elf/...` path) that does not exist on this
    machine — the working toolchain is at
    `~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-objdump`. A single
    `Img` class holding the segment table with `off_to_va`, `va_to_off`, `read`, `u32`,

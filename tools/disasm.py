@@ -3,13 +3,22 @@
 
 usage: disasm.py <va_hex> <length> [--raw]
 """
+import os
 import struct
 import subprocess
 import sys
 import tempfile
 
-MERGED = "/Users/billpapas/AI/worklouder/firmware/firmware_v0.6.1_merged.bin"
-OBJDUMP = "/Users/billpapas/AI/worklouder/tools/xtensa-esp-elf/bin/xtensa-esp-elf-objdump"
+MERGED = os.environ.get("LM_VENDOR_FW", "")
+if not MERGED or not os.path.isfile(MERGED):
+    raise SystemExit(
+        "Set LM_VENDOR_FW to a vendor firmware image, e.g.\n"
+        "  LM_VENDOR_FW=~/path/firmware_v0.6.1_merged.bin python3 " + os.path.basename(__file__) + "\n"
+        "This repo deliberately ships no vendor firmware — see tools/README.md.")
+# An Xtensa objdump. The PlatformIO toolchain ships one; tools/README.md covers fetching it.
+OBJDUMP = os.environ.get(
+    "LM_XTENSA_OBJDUMP",
+    os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-objdump"))
 APP_OFF = 0x10000
 
 data = open(MERGED, "rb").read()

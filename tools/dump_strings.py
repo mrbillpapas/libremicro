@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Dump the string-pool neighbourhood around the v.oai.* RPC methods."""
+import os
 import re
 
-FW = "/Users/billpapas/AI/worklouder/firmware/firmware_v0.6.1_merged.bin"
+FW = os.environ.get("LM_VENDOR_FW", "")
+if not FW or not os.path.isfile(FW):
+    raise SystemExit(
+        "Set LM_VENDOR_FW to a vendor firmware image, e.g.\n"
+        "  LM_VENDOR_FW=~/path/firmware_v0.6.1_merged.bin python3 " + os.path.basename(__file__) + "\n"
+        "This repo deliberately ships no vendor firmware — see tools/README.md.")
 data = open(FW, "rb").read()
 
 STR = re.compile(rb"[\x20-\x7e]{3,}")
