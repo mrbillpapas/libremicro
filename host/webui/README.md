@@ -86,15 +86,36 @@ Contract notes for whoever is writing the daemon side:
 
 ## Bindings
 
-The **Bindings** tab edits one control at a time: a chip per key (`0`–`12`, each showing its label
-and how many triggers it has bound), plus the encoder, the touch pad and the rear button. Clicking
-a key on the board selects it here too — and *stays* on this tab rather than jumping to Colour.
-The encoder and touch-pad ghosts on the board take a pointer click straight into this panel; they
-remain out of the tab order and `aria-hidden`, because they carry no LED and the chips are the
-keyboard path to the same thing.
+The **Bindings** tab edits one control at a time, and **which control is picked on a map of the
+pad** — the same 4×4 grid as the device view, not a wrapped list of chips. Encoder, key 0, key 1
+and the joystick across the top; keys 2–5 and 6–9; touch pad, the wide cap over keys 10/11, key 12
+along the bottom. Every position comes out of the same `buildGeometry()` the board is drawn from
+(`GEO`, `KEY_GRID_COLS`, `SHARED_KEYCAPS`, `FEATURES`, translated to CSS grid rows and columns), so
+the picker and the board cannot drift apart: there is one statement of physical placement in
+`app.js` and both views read it.
 
-Every applicable trigger kind gets a card — press / release / hold / double for keys, the touch pad
-and the rear button; cw / ccw / press for the encoder, which is all the schema defines for it.
+It is deliberately **lighter than the device view** — no LED colour, no underglow, no live preview,
+no status LEDs (they carry no bindings). What it adds instead is **binding density**: each cell
+badges how many triggers that control has bound, and a control with nothing bound is drawn quieter
+than one with several, so where a config is thick is visible without opening all seventeen.
+
+Two bindable things are not on the front grid and are not pretended into it:
+
+- the **rear button** is on the *back* of the device, so it sits below the grid on the other side of
+  a dashed rule, labelled "on the back — no position on the front grid";
+- the **joystick** is one slot on the grid and eight bindable directions. Selecting the stick opens
+  a **compass** — `NW N NE / W · E / SW S SE`, each with its own count — because a direction *is* a
+  position, so picking one is the same kind of act as picking a key.
+
+Clicking a key on the board selects it here too — and *stays* on this tab rather than jumping to
+Colour. The encoder, joystick and touch-pad ghosts on the board take a pointer click straight into
+this panel (the stick lands on the direction being edited, else the first one with something bound);
+they remain out of the tab order and `aria-hidden`, because they carry no LED and the control map is
+the keyboard path to the same thing.
+
+Every applicable trigger kind gets a card — press / release / hold / double for keys, the touch pad,
+the rear button and each joystick direction; cw / ccw / press for the encoder, which is all the
+schema defines for it.
 Each card has one `Does` select covering all nine action keys (`launch`, `shortcut`, `text`,
 `shell`, `script`, `applescript`, `mode`, `profile`, `action`), the value editor for whichever is
 chosen, and the optional `flash` colour.
@@ -102,8 +123,9 @@ chosen, and the optional `flash` colour.
 - **Exactly one action per binding, enforced by construction.** `binding` is a `oneOf` in the
   schema, so choosing a different type *replaces* the action key rather than adding one; `(nothing)`
   removes the trigger, and an emptied `on` / `encoder` / `touch` object is dropped rather than left
-  behind as `{}`. Text is carried across a type change only between the free-text kinds — `shell` to
-  `script` is a rename, `shell` to "activate mode" is not.
+  behind as `{}` — for the joystick that is two levels, the direction and then `joystick` itself once
+  its last direction goes. Text is carried across a type change only between the free-text kinds —
+  `shell` to `script` is a rename, `shell` to "activate mode" is not.
 - **A mode's `encoder` is the exception to pruning**: the schema *requires* it, so an empty
   `encoder: {}` is the valid way for a mode to rebind nothing.
 - **`mode` and `profile` are pickers, not text fields**, so they can't name something that doesn't
@@ -179,6 +201,7 @@ reaching for the pad. Every trigger card has a `Test` button that injects the ma
 | encoder press | `{line:"enc press"}` then `"enc release"` |
 | touch / rear press, double | `{line:"touch"}` — the bare form, exactly what v2 sends |
 | touch / rear hold | `{line:"touch down"}`, wait `hold_ms`, `{line:"touch up"}` |
+| joystick, any kind | `{line:"joy ne down"}` … `{line:"joy ne up"}` — a sector has to open *and* close, so even a plain press is a pair (`events.py` takes no bare `joy` line) |
 
 **It is never disguised as a real press.** The toast says "this was injected, not a real press",
 the event feed tags it `injected`, and the board highlight for an injected event is a *dashed*
@@ -210,7 +233,8 @@ than growing a mode picker inside every panel, the whole editor has one **`Editi
 to the profile picker: *profile default*, or one of its modes. It follows
 [`dispatch.py`](../daemon/libremicro/dispatch.py)'s resolution order exactly —
 
-- **keys** and the **encoder** belong to the layer being edited;
+- **keys**, the **encoder** and each **joystick direction** belong to the layer being edited — a
+  mode's `joystick` overrides the profile's direction by direction, exactly as its `keys` do;
 - **touch** and **rear** are profile-level only, because modes don't override them, and the
   Bindings panel says so instead of letting you believe otherwise;
 - the device view previews the *merged* result the way
@@ -259,9 +283,10 @@ inventing geometry — `KEY_GRID_COLS`, `SHARED_KEYCAPS`, `FEATURES`, `UNDERGLOW
   comes from the `SHARED_KEYCAPS` constant, not from hardcoded positions.
 - **Encoder `(0,0)`, joystick `(0,3)`, touch pad `(3,0)`** are drawn as ghost outlines for
   orientation. They are not addressable LEDs, so they are not focusable and never selectable *as
-  LEDs*. The encoder and touch pad do carry bindings, so they take a pointer click into the
-  Bindings panel (the chips there are the keyboard path) and they light up when their events
-  arrive. The joystick has no triggers in schema v2 and stays completely inert.
+  LEDs*. All three do carry bindings, so each takes a pointer click into the Bindings panel (the
+  control map there is the keyboard path) and each lights up when its events arrive — the stick for
+  any of its eight directions. The picker's glyphs for them are drawn by this same `featureGlyph()`,
+  on a synthetic cell, so the two views cannot disagree about what an encoder looks like either.
 - **8 underglow LEDs tiling the WHOLE perimeter**, an eighth of its length each, with no gaps. The
   eight ring positions (3×3 minus centre) are the four corners and four edge midpoints of the
   square, so going clockwise they alternate corner, edge-midpoint, corner, edge-midpoint and every
@@ -337,8 +362,16 @@ gradient the device renders.
   logical index, its strip index, and — for the wide cap — the index it shares a keycap with.
 - Tabs are a proper tablist: arrows, Home/End. Eight of them fit one row at 1280 px.
 - Palette stop handles are buttons; arrows nudge position by 0.01 (0.05 with Shift).
-- Control chips are buttons carrying `aria-pressed`; every binding editor control is a real
-  labelled form field, and the trigger cards are plain tab-order DOM in trigger order.
+- The Bindings tab's **control map is one tab stop, not seventeen**: a roving `tabindex` puts the
+  stop on the selected control, and arrow keys walk the grid from there — along a row to the next
+  occupied column (which is what steps between the two halves of the wide cap), and up/down straight
+  ahead to the nearest row that has this column, so a step never veers sideways. `ArrowDown` off the
+  bottom row reaches the rear button, since it is drawn one row below the grid. Enter/Space selects,
+  the same contract as the device view, and focus stays on the cell it was on across the re-render.
+  The compass is its own small grid on the same rules. Every cell is a button carrying `aria-pressed`
+  with an accessible name that reads its index, label, shared-keycap mate and binding count; every
+  other binding editor control is a real labelled form field, and the trigger cards are plain
+  tab-order DOM in trigger order.
 - The shortcut recorder captures on `window` with `capture: true` while it is armed and releases
   the listener when it stops — leaving the Bindings tab stops it, so it can never sit there
   swallowing keystrokes.

@@ -59,10 +59,30 @@ const EFFECT_DEFAULTS = { speed: 0.3, intensity: 0.5, direction: 'horizontal', r
 /* ------------------------------------------------------------------ bindings */
 
 /* Trigger kinds per control, exactly as the schema has them: `triggers` for anything that
- * presses (keys, the touch pad, the rear button) and `encoder` for the dial. The encoder has no
- * hold/double because a detent has no duration — see events.py's Recognizer.rotate. */
+ * presses (keys, the touch pad, the rear button, and each joystick direction) and `encoder` for
+ * the dial. The encoder has no hold/double because a detent has no duration — see events.py's
+ * Recognizer.rotate. */
 const KEY_TRIGGERS = ['press', 'release', 'hold', 'double'];
 const ENC_TRIGGERS = ['cw', 'ccw', 'press'];
+
+/* The joystick's eight directions, IN events.py's JOY_DIRS ORDER — that order is the direction's
+ * `Trigger.index` on the daemon side, so `state.bind.index` for the joystick is an index into
+ * this list and nothing here may be reordered. The config stores the NAME (`profiles.*.joystick.n`
+ * and friends), so a reorder would not corrupt a document, but it would misname every injected
+ * `joy` line. Each direction takes the full `triggers` set: the disc is a free 360°, split into
+ * eight 45° sectors, so hold and double work on a direction exactly as they do on a key. */
+const JOY_DIRS = ['e', 'ne', 'n', 'nw', 'w', 'sw', 's', 'se'];
+const JOY_LABEL = {
+  n: 'north', ne: 'north-east', e: 'east', se: 'south-east',
+  s: 'south', sw: 'south-west', w: 'west', nw: 'north-west',
+};
+/* Where each direction sits in the 3x3 compass the picker draws — the direction IS its position,
+ * which is the whole reason the picker is a compass and not a list. [row, col]. */
+const JOY_CELL = {
+  nw: [0, 0], n: [0, 1], ne: [0, 2],
+  w: [1, 0], e: [1, 2],
+  sw: [2, 0], s: [2, 1], se: [2, 2],
+};
 
 const TRIGGER_LABEL = {
   press: 'Press', release: 'Release', hold: 'Hold', double: 'Double tap',
@@ -1063,12 +1083,11 @@ const svgRefs = { keys: new Map(), ug: new Map(), status: [], glow: new Map(), f
 
 /** Ghost glyph for a non-key control. Never focusable, never addressable, never selectable. */
 function featureGlyph(f) {
-  // The encoder and the touch pad carry no LED but do carry bindings, so they take a pointer
-  // click through to the Bindings panel. Still aria-hidden and still not focusable: the panel's
-  // own chips are the keyboard path, and the tab order through the board stays LEDs-only.
+  // None of the three carries an LED, but all three carry bindings, so they take a pointer click
+  // through to the Bindings panel. Still aria-hidden and still not focusable: the panel's own
+  // control map is the keyboard path, and the tab order through the board stays LEDs-only.
   const g = svgEl('g', {
-    class: `feat feat-${f.kind}`, 'aria-hidden': 'true',
-    'data-bindable': f.kind === 'joystick' ? '0' : '1',
+    class: `feat feat-${f.kind}`, 'aria-hidden': 'true', 'data-bindable': '1',
   });
   // `padLeft` is slot width claimed by something else drawn in the same slot — the status LED
   // column, which sits immediately left of the touch pad. The glyph centres in what is left of the
@@ -1171,8 +1190,8 @@ function buildDevice() {
   }));
 
   // The three non-key controls, so the board is recognisable as the real pad. They carry no LED,
-  // but the encoder and the touch pad DO carry bindings, so they are kept addressable here for
-  // the event highlight and for a pointer shortcut into the Bindings panel.
+  // but all three DO carry bindings, so they are kept addressable here for the event highlight and
+  // for a pointer shortcut into the Bindings panel.
   for (const f of geom.featureCells) {
     const g = featureGlyph(f);
     svg.append(g);
@@ -2171,21 +2190,39 @@ const CONTROL_META = {
   encoder: { label: 'Encoder', triggers: ENC_TRIGGERS },
   touch: { label: 'Touch pad', triggers: KEY_TRIGGERS },
   rear: { label: 'Rear button', triggers: KEY_TRIGGERS },
+  joystick: { label: 'Joystick', triggers: KEY_TRIGGERS },
 };
 const controlTriggers = (c) => (CONTROL_META[c] || CONTROL_META.key).triggers;
-const controlName = (c, i) => (c === 'key' ? `key ${i}` : (CONTROL_META[c] || {}).label || c);
+const controlName = (c, i) => {
+  if (c === 'key') return `key ${i}`;
+  // A joystick direction is the control here, not the stick: each of the eight binds on its own.
+  if (c === 'joystick') return `joystick ${JOY_LABEL[JOY_DIRS[i]] || '?'}`;
+  return (CONTROL_META[c] || {}).label || c;
+};
 
 /** The `triggers` object for a control in the scope being edited, created on demand.
  *
- *  Where it lives follows dispatch.py exactly: a key's bindings and the encoder's belong to the
- *  layer (mode override, else profile), while touch and rear are profile-level only because
- *  modes don't override them. */
+ *  Where it lives follows dispatch.py exactly: a key's bindings, the encoder's and each joystick
+ *  direction's belong to the layer (mode override, else profile), while touch and rear are
+ *  profile-level only because modes don't override them. */
 function triggersFor(control, index, create = false) {
   if (control === 'key') {
     const e = keyEntry(index, create);
     if (!e) return null;
     if (!e.on || typeof e.on !== 'object') { if (!create) return null; e.on = {}; }
     return e.on;
+  }
+  if (control === 'joystick') {
+    // `joystick` is an object of eight named directions, each one a full `triggers` object —
+    // dispatch.py resolves a mode's joystick first and falls back to the profile's, direction by
+    // direction, exactly as it does for keys, so this belongs to the layer being edited.
+    const owner = scopeOwner();
+    const name = JOY_DIRS[index];
+    if (!owner || !name) return null;
+    if (!owner.joystick || typeof owner.joystick !== 'object') { if (!create) return null; owner.joystick = {}; }
+    const j = owner.joystick;
+    if (!j[name] || typeof j[name] !== 'object') { if (!create) return null; j[name] = {}; }
+    return j[name];
   }
   const owner = control === 'encoder' ? scopeOwner() : currentProfile();
   if (!owner) return null;
@@ -2210,6 +2247,15 @@ const actionKeyOf = (b) => (b ? BINDING_KEYS.find((k) => b[k] !== undefined) || 
  *  schema *requires* its `encoder`, so an empty one there is the valid way to say "no rotation". */
 function cleanupTriggers(control, index) {
   if (control === 'key') { pruneKeyEntry(index); return; }
+  if (control === 'joystick') {
+    // Two levels to prune: the direction, then `joystick` itself once its last direction goes.
+    const o = scopeOwner();
+    const name = JOY_DIRS[index];
+    if (!o || !name || !o.joystick) return;
+    if (o.joystick[name] && !Object.keys(o.joystick[name]).length) delete o.joystick[name];
+    if (!Object.keys(o.joystick).length) delete o.joystick;
+    return;
+  }
   const owner = control === 'encoder' ? scopeOwner() : currentProfile();
   if (!owner || !owner[control]) return;
   if (Object.keys(owner[control]).length) return;
@@ -2295,40 +2341,220 @@ function renderBindingsPanel() {
   renderTimingBox();
 }
 
-/** Chips for every bindable control. Keys come from the geometry, so a config with odd
- *  `key_rows` still lists exactly the switches the board drew. */
+/* --------------------------------------------------------- the control picker
+ *
+ * Which control is being edited is chosen ON A MAP OF THE PAD, laid out as the real 4x4 grid, not
+ * as a wrapped list of chips. Every position comes out of buildGeometry() — the same `caps`,
+ * `cells` and `featureCells` the device view is drawn from, translated to CSS grid rows and
+ * columns — so the picker and the board cannot drift apart: there is one source of physical
+ * placement in this file and both views read it.
+ *
+ * It is deliberately NOT a second copy of the device view. No LED colour, no underglow, no live
+ * preview, no status LEDs (those carry no bindings). What it does carry is binding density: a
+ * control with nothing bound is drawn quieter than one with several, so where a config is thick
+ * is visible without clicking through 16 controls.
+ *
+ * Two bindable things are not on the front grid and are not pretended into it:
+ *   - the REAR BUTTON, which is physically on the back — its own strip below the grid, labelled;
+ *   - the JOYSTICK's eight directions, which are one slot on the grid and a compass beneath it.
+ */
+
+/** Picker-sized glyph for a non-key control, drawn by the board's OWN featureGlyph() on a
+ *  synthetic cell — so the marks here are literally the same drawing code as the device view's. */
+function pickerGlyph(kind) {
+  const svg = svgEl('svg', {
+    class: 'ctlglyph', viewBox: '0 0 36 34', width: 28, height: 26,
+    'aria-hidden': 'true', focusable: 'false',
+  });
+  // featureGlyph() reserves the bottom of its cell for a caption and centres the shape 6px above
+  // the cell's middle; `label: ''` leaves the caption empty, since the button has real text.
+  svg.append(featureGlyph({ kind, label: '', x: 0, y: 0, w: 36, h: 34, cx: 18, cy: 23 }));
+  return svg;
+}
+
+/** The rear button, seen from the front: the body's outline dashed because it is on the far side. */
+function rearGlyph() {
+  const svg = svgEl('svg', {
+    class: 'ctlglyph', viewBox: '0 0 36 34', width: 28, height: 26,
+    'aria-hidden': 'true', focusable: 'false',
+  });
+  const g = svgEl('g', { class: 'feat feat-rear' });
+  g.append(svgEl('rect', { class: 'feat-shape feat-dash', x: 6, y: 6, width: 24, height: 21, rx: 5 }));
+  g.append(svgEl('circle', { class: 'feat-knob', cx: 18, cy: 16.5, r: 4.4 }));
+  svg.append(g);
+  return svg;
+}
+
+/** Total bindings across all eight joystick directions — what the stick's own cell counts. */
+const joyTotalBindings = () => JOY_DIRS.reduce((s, _d, i) => s + boundKinds('joystick', i).length, 0);
+
+/** Which direction selecting the stick lands on: the one being edited, else the first that has
+ *  something bound, else north. */
+function joyDefaultDir() {
+  if (state.bind.control === 'joystick') return state.bind.index;
+  const bound = JOY_DIRS.findIndex((_d, i) => boundKinds('joystick', i).length > 0);
+  return bound === -1 ? JOY_DIRS.indexOf('n') : bound;
+}
+
+/** Set the single tab stop of a roving group. */
+function rove(list, target) {
+  for (const e of list) e.setAttribute('tabindex', e === target ? '0' : '-1');
+}
+
 function renderControlPicker() {
   const wrap = $('bind-controls');
-  const hadFocus = wrap.contains(document.activeElement);
+  // Remember WHICH cell had focus, not merely that something did: selecting re-renders the picker,
+  // and focus has to come back to the cell the user is standing on rather than jumping to the
+  // selection. `data-fk` identifies a cell across a rebuild.
+  const act = document.activeElement;
+  const focusKey = wrap.contains(act) ? act.dataset?.fk || null : null;
   wrap.textContent = '';
 
-  const chip = (control, index, label, sub) => {
-    const n = boundKinds(control, index).length;
+  const g = state.geom || buildGeometry();
+
+  /* How loudly to draw a control. A key with nothing bound must read quieter than one with three,
+   * which is the whole reason the counts are on the map instead of in a table. */
+  const density = (n) => (n === 0 ? '0' : n < 3 ? '1' : '2');
+
+  const cell = (control, index, o) => {
+    const n = o.count === undefined ? boundKinds(control, index).length : o.count;
     const b = el('button', {
-      type: 'button', class: 'chip', 'aria-pressed': state.bind.control === control && state.bind.index === index ? 'true' : 'false',
-      'data-control': control, 'data-index': String(index),
-      title: `${label}${sub ? ' — ' + sub : ''} · ${n} binding${n === 1 ? '' : 's'}`,
+      type: 'button', class: 'ctlcell' + (o.cls ? ' ' + o.cls : ''), tabindex: '-1',
+      'aria-pressed': state.bind.control === control && state.bind.index === index ? 'true' : 'false',
+      'data-control': control, 'data-index': String(index), 'data-fk': `map:${control}:${index}`,
+      'data-dens': density(n), 'data-nr': String(o.nr), 'data-nc': String(o.nc),
+      title: `${o.title} · ${n} binding${n === 1 ? '' : 's'}`,
+      'aria-label': `${o.aria || o.title}, ${n} binding${n === 1 ? '' : 's'}`,
     }, [
-      el('span', { class: 'chip-t', text: label }),
-      sub ? el('span', { class: 'chip-s', text: sub }) : null,
-      el('span', { class: 'chip-n', text: n ? String(n) : '', 'aria-hidden': n ? null : 'true' }),
+      o.glyph || null,
+      el('span', { class: 'cc-t', text: o.top }),
+      o.sub ? el('span', { class: 'cc-s', text: o.sub }) : null,
+      el('span', { class: 'cc-n', text: n ? String(n) : '', 'aria-hidden': 'true' }),
     ]);
     b.addEventListener('click', () => selectControl(control, index));
     return b;
   };
 
-  const keys = el('div', { class: 'chiprow' });
-  const count = state.geom?.keys?.length || KEY_COUNT;
-  for (let i = 0; i < Math.min(count, KEY_COUNT); i++) keys.append(chip('key', i, String(i), keyLabelOf(i)));
-  wrap.append(keys);
+  const map = el('div', { class: 'ctlmap' });
+  map.style.gridTemplateColumns = `repeat(${g.nCols}, minmax(0, 1fr))`;
+  const place = (node, row, gcol, span = 1) => {
+    node.style.gridRow = String(row + 1);
+    node.style.gridColumn = `${gcol + 1} / span ${span}`;
+    map.append(node);
+  };
 
-  const others = el('div', { class: 'chiprow' });
-  others.append(chip('encoder', 0, 'Encoder', 'cw / ccw / press'));
-  others.append(chip('touch', 0, 'Touch pad', 'profile-level'));
-  others.append(chip('rear', 0, 'Rear button', 'profile-level'));
-  wrap.append(others);
+  /* Keycaps, straight off geom.caps: 13 switches under 12 caps, so the shared pair is ONE cap box
+   * with two half-buttons in it — the same fact the board draws, at picker size. */
+  for (const cap of g.caps) {
+    const cols = cap.cells.map((c) => c.gcol);
+    const gc0 = Math.min(...cols);
+    const box = el('div', { class: 'ctlcap' + (cap.shared ? ' shared' : '') });
+    for (const c of cap.cells.slice().sort((a, b) => a.gcol - b.gcol)) {
+      const i = indexAtPos('keys', `${c.row},${c.col}`);
+      if (i === null) continue;
+      const label = keyLabelOf(i);
+      const mates = capMateIndices(`${c.row},${c.col}`);
+      box.append(cell('key', i, {
+        nr: c.row, nc: c.gcol, cls: 'key' + (cap.shared ? ' half' : ''),
+        top: String(i), sub: label,
+        title: `key ${i}${label ? ' — ' + label : ''}`
+          + (mates.length ? ` · one wide keycap shared with index ${mates.join(' and ')}` : ''),
+        aria: `key ${i}${label ? `, ${label}` : ''}`
+          + (mates.length ? `, one wide keycap shared with index ${mates.join(' and ')}` : ''),
+      }));
+    }
+    place(box, cap.cells[0].row, gc0, Math.max(...cols) - gc0 + 1);
+  }
 
-  if (hadFocus) wrap.querySelector('[aria-pressed="true"]')?.focus();
+  // The non-key controls, in the very slots the board draws them in. All three are bindable; none
+  // of them is an LED, which is why they are ghosts on the board and ordinary cells here.
+  for (const f of g.featureCells) {
+    if (f.kind === 'joystick') {
+      const dir = joyDefaultDir();
+      place(cell('joystick', dir, {
+        nr: f.row, nc: f.gcol, cls: 'featcell joy', glyph: pickerGlyph(f.kind),
+        top: f.label, count: joyTotalBindings(),
+        sub: state.bind.control === 'joystick' ? JOY_LABEL[JOY_DIRS[dir]] : '8 directions',
+        title: 'joystick — eight directions, each bound on its own',
+        aria: 'joystick, eight directions each bound on its own',
+      }), f.row, f.gcol);
+      continue;
+    }
+    place(cell(f.kind, 0, {
+      nr: f.row, nc: f.gcol, cls: 'featcell', glyph: pickerGlyph(f.kind),
+      top: f.label, sub: f.kind === 'encoder' ? 'cw / ccw / press' : 'profile-level',
+      title: f.kind === 'encoder' ? 'encoder — rotation and its button' : 'capacitive touch pad',
+    }), f.row, f.gcol);
+  }
+  wrap.append(map);
+
+  /* The rear button is on the BACK of the device. There is no slot for it on the front grid and
+   * dropping it into a spare one would be a lie about the hardware, so it lives just outside the
+   * grid, on the other side of a dashed line, saying where it is. */
+  const off = el('div', { class: 'ctloff' });
+  off.append(cell('rear', 0, {
+    nr: g.nRows, nc: 0, cls: 'featcell rear', glyph: rearGlyph(),
+    top: 'rear button', sub: 'profile-level',
+    title: 'rear button — on the back of the device, not on the front grid',
+    aria: 'rear button, on the back of the device, off the front grid',
+  }));
+  off.append(el('span', { class: 'ctloff-t', text: 'on the back — no position on the front grid' }));
+  wrap.append(off);
+
+  // The stick's eight sectors, as a compass: a direction IS a position, so picking one is the same
+  // kind of act as picking a key. Only shown while the joystick is the control being edited.
+  if (state.bind.control === 'joystick') wrap.append(joystickCompass());
+
+  /* Roving tabindex: the whole map is ONE tab stop and arrow keys walk it, where the old flat list
+   * was sixteen stops. The compass is a second stop while it is open. */
+  const cells = [...wrap.querySelectorAll('[data-nr]')];
+  rove(cells, cells.find((c) => c.getAttribute('aria-pressed') === 'true') || cells[0]);
+  if (focusKey) {
+    const back = [...wrap.querySelectorAll('[data-fk]')].find((c) => c.dataset.fk === focusKey);
+    const home = back || wrap.querySelector('[aria-pressed="true"]');
+    if (home) {
+      rove(home.hasAttribute('data-jr') ? [...wrap.querySelectorAll('[data-jr]')] : cells, home);
+      home.focus();
+    }
+  }
+}
+
+/** The joystick's eight directions, laid out as the compass they are. */
+function joystickCompass() {
+  const box = el('div', { class: 'ctljoy', role: 'group', 'aria-label': 'Joystick direction' });
+  const grid = el('div', { class: 'ctljoy-grid' });
+  for (const [name, [r, c]] of Object.entries(JOY_CELL)) {
+    const i = JOY_DIRS.indexOf(name);
+    const n = boundKinds('joystick', i).length;
+    const on = state.bind.control === 'joystick' && state.bind.index === i;
+    const b = el('button', {
+      type: 'button', class: 'ctldir', tabindex: on ? '0' : '-1',
+      'aria-pressed': on ? 'true' : 'false',
+      'data-control': 'joystick', 'data-index': String(i), 'data-fk': `dir:joystick:${i}`,
+      'data-dens': n === 0 ? '0' : n < 3 ? '1' : '2',
+      'data-jr': String(r), 'data-jc': String(c),
+      title: `joystick ${JOY_LABEL[name]} · ${n} binding${n === 1 ? '' : 's'}`,
+      'aria-label': `joystick ${JOY_LABEL[name]}, ${n} binding${n === 1 ? '' : 's'}`,
+    }, [
+      el('span', { class: 'cc-t', text: name.toUpperCase() }),
+      el('span', { class: 'cc-n', text: n ? String(n) : '', 'aria-hidden': 'true' }),
+    ]);
+    b.style.gridArea = `${r + 1} / ${c + 1}`;
+    b.addEventListener('click', () => selectControl('joystick', i));
+    grid.append(b);
+  }
+  // The middle of the compass is the stick at rest: no sector, so nothing to bind.
+  const hub = el('span', { class: 'ctljoy-hub', 'aria-hidden': 'true' });
+  hub.style.gridArea = '2 / 2';
+  grid.append(hub);
+  box.append(grid, el('div', { class: 'ctljoy-side' }, [
+    el('span', { class: 'ctljoy-t', text: 'Joystick direction' }),
+    el('p', { class: 'hint tight', text:
+      'A free 360° disc cut into eight 45° sectors — the four marks on the faceplate are a '
+      + 'convention, not a gate. Each direction binds on its own, with the full press / release / '
+      + 'hold / double set.' }),
+  ]));
+  return box;
 }
 
 function selectControl(control, index) {
@@ -2765,6 +2991,7 @@ function countSynthBindings() {
   const scanOwner = (o) => {
     for (const k of o?.keys || []) scan(k?.on);
     scan(o?.encoder); scan(o?.touch); scan(o?.rear);
+    for (const d of JOY_DIRS) scan(o?.joystick?.[d]);
   };
   for (const p of Object.values(state.config?.profiles || {})) {
     scanOwner(p);
@@ -2825,6 +3052,24 @@ async function testTrigger(control, index, kind) {
       if (ok) ok = await inject({ key: index });    // second tap inside double_ms
     } else {
       ok = await inject({ key: index });
+    }
+  } else if (control === 'joystick') {
+    // A joystick direction is `joy <dir> down|up` — events.py takes no bare form for it, because a
+    // sector has to open and close, so even a plain press is a pair.
+    const dir = JOY_DIRS[index];
+    const down = () => inject({ line: `joy ${dir} down` });
+    const up = () => inject({ line: `joy ${dir} up` });
+    if (kind === 'hold') {
+      ok = await down();
+      if (ok) { await wait(holdMs() + HOLD_MARGIN_MS); ok = await up(); }
+    } else if (kind === 'double') {
+      ok = await down();
+      if (ok) ok = await up();
+      if (ok) ok = await down();
+      if (ok) ok = await up();
+    } else {
+      ok = await down();
+      if (ok) ok = await up();
     }
   } else {
     // touch / rear: v2 sends one bare line per activation, but the daemon also accepts an
@@ -3106,6 +3351,9 @@ function flagHit(e) {
     noteHit('encoder', 0, e.source === 'device' ? 'device' : 'injected');
   } else if (e.event === 'touch') {
     noteHit('touch', 0, e.source === 'device' ? 'device' : 'injected');
+  } else if (e.event === 'joy') {
+    // One glyph for all eight sectors, so the stick lights whichever direction moved.
+    noteHit('joystick', 0, e.source === 'device' ? 'device' : 'injected');
   }
 }
 
@@ -3125,6 +3373,14 @@ function explainEvent(e) {
     const w = args[0] || '';
     if (w === 'cw' || w === 'ccw') return `encoder detent ${w}${bindingAt('encoder', 0, w) ? ` → ${describeBinding(bindingAt('encoder', 0, w))}` : ' · nothing bound'}`;
     return `encoder button ${w}`;
+  }
+  if (e.event === 'joy') {
+    const d = args[0] || '';
+    const i = JOY_DIRS.indexOf(d);
+    if (i === -1) return `joystick direction "${args[0]}" is not one of ${JOY_DIRS.join(', ')}`;
+    const kinds = boundKinds('joystick', i);
+    return `joystick ${JOY_LABEL[d]} · ${args[1] || 'edge'}`
+      + (kinds.length ? ` · bound: ${kinds.join(', ')}` : ' · nothing bound');
   }
   if (e.event === 'touch') return 'capacitive touch pad' + (args.length ? ` ${args.join(' ')}` : ' (a tap: one line, no down/up)');
   if (e.event === 'rear') return 'rear button' + (args.length ? ` ${args.join(' ')}` : ' (a tap: one line, no down/up)');
@@ -3463,6 +3719,16 @@ function checkTriggers(errs, cfg, where, owner) {
   scan('encoder', owner?.encoder, ENC_TRIGGERS);
   scan('touch', owner?.touch, KEY_TRIGGERS);
   scan('rear', owner?.rear, KEY_TRIGGERS);
+  const joy = owner?.joystick;
+  if (joy !== undefined) {
+    if (!joy || typeof joy !== 'object') errs.push(`${where}: joystick is not an object`);
+    else {
+      for (const [d, t] of Object.entries(joy)) {
+        if (!JOY_DIRS.includes(d)) errs.push(`${where}: joystick has no direction "${d}" (one of ${JOY_DIRS.join(', ')})`);
+        else scan(`joystick.${d}`, t, KEY_TRIGGERS);
+      }
+    }
+  }
 }
 
 /* ============================================== 19. load / save / transfer */
@@ -3674,15 +3940,16 @@ function wireDeviceView() {
   svg.addEventListener('click', (ev) => {
     const g = ev.target.closest('.cell-g');
     if (g) { activate(g); return; }
-    // Pointer shortcut only: the encoder and touch-pad ghosts are not LEDs, so they stay out of
-    // the tab order and out of the accessible tree — the Bindings panel's chips are the
-    // keyboard-reachable way to the same thing.
+    // Pointer shortcut only: the encoder, joystick and touch-pad ghosts are not LEDs, so they stay
+    // out of the tab order and out of the accessible tree — the Bindings panel's control map is
+    // the keyboard-reachable way to the same thing.
     const feat = ev.target.closest('.feat');
     if (!feat) return;
     for (const [kind, ref] of svgRefs.feat) {
       if (ref.g !== feat) continue;
-      if (kind === 'joystick') { toast('The joystick has no bindings in schema v2 — no triggers are defined for it', 'warn', 5000); return; }
-      selectControl(kind === 'touch' ? 'touch' : kind, 0);
+      // The joystick binds per direction, so clicking the stick lands on a direction — the one
+      // already being edited, else the first with something bound. The compass picks another.
+      selectControl(kind, kind === 'joystick' ? joyDefaultDir() : 0);
       showTab('bindings');
       return;
     }
@@ -4046,6 +4313,44 @@ function wireIdentifyPanel() {
 }
 
 function wireBindingsPanel() {
+  /* Arrow keys walk the control map, exactly as they walk the board: focus moves, Enter/Space
+   * selects. Two independent grids live in here — the pad map (data-nr / data-nc, in grid rows and
+   * columns, with the off-grid rear button one row below the last) and the joystick compass
+   * (data-jr / data-jc) — and a step stays inside whichever one the focus is in. */
+  $('bind-controls').addEventListener('keydown', (ev) => {
+    const step = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+    if (!step) return;
+    const cur = ev.target.closest && ev.target.closest('[data-nr], [data-jr]');
+    if (!cur) return;
+    const [kr, kc] = cur.hasAttribute('data-jr') ? ['jr', 'jc'] : ['nr', 'nc'];
+    const all = [...$('bind-controls').querySelectorAll(`[data-${kr}]`)];
+    const at = (e) => [Number(e.dataset[kr]), Number(e.dataset[kc])];
+    const [r, c] = at(cur);
+    const nearestCol = (list) => list.sort((a, b) => Math.abs(at(a)[1] - c) - Math.abs(at(b)[1] - c))[0] || null;
+    let target = null;
+    if (step[0]) {
+      // Along the row to the next occupied column — which is what steps between the two halves of
+      // the wide cap, since they are two columns of one cap.
+      target = nearestCol(all.filter((e) => at(e)[0] === r && Math.sign(at(e)[1] - c) === step[0]));
+    } else {
+      const rows = [...new Set(all.map((e) => at(e)[0]))]
+        .filter((rr) => Math.sign(rr - r) === step[1])
+        .sort((a, b) => Math.abs(a - r) - Math.abs(b - r));
+      // Straight ahead wins: the nearest row in that direction that HAS this column. That is what
+      // takes north to south across the compass's empty middle instead of sliding off to west, and
+      // on the pad map it steps over the slot a non-key control holds rather than veering.
+      for (const rr of rows) {
+        const ahead = all.find((e) => at(e)[0] === rr && at(e)[1] === c);
+        if (ahead) { target = ahead; break; }
+      }
+      if (!target && rows.length) target = nearestCol(all.filter((e) => at(e)[0] === rows[0]));
+    }
+    if (!target) return;
+    ev.preventDefault();
+    rove(all, target);
+    target.focus();
+  });
+
   $('bind-label').addEventListener('input', (ev) => {
     const { control, index } = state.bind;
     if (control !== 'key') return;

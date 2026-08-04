@@ -404,25 +404,110 @@ textarea#json-view {
 
 /* ---------------------------------------------------------- binding editor */
 
-/* Control picker: one chip per bindable control, with a count of what's bound on it. */
-.ctlpick { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
-.chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip {
-  position: relative; display: flex; flex-direction: column; align-items: flex-start;
-  gap: 1px; min-width: 44px; padding: 5px 9px; line-height: 1.25;
-  background: var(--bg-2); border: 1px solid var(--line);
+/* Control picker: the pad's own 4x4 grid, so choosing what to edit means pointing at where it is.
+   Positions come from buildGeometry() as inline grid-row / grid-column, which is why there is no
+   hardcoded arrangement here — only how a cell looks. Deliberately lighter than the device view:
+   no LED colour, no underglow, no preview. Selection and binding density are the only colour. */
+.ctlpick { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 10px 0 4px; }
+.ctlmap {
+  display: grid; gap: 5px; grid-auto-rows: 56px;
+  width: 100%; max-width: 380px;
 }
-.chip:hover { background: var(--bg-3); }
-.chip[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2));
+/* A keycap. 12 caps over 13 switches: the shared one is ONE outline with a hairline seam and two
+   half-buttons inside it — the same drawing the board makes, so it reads as one cap there and one
+   cap here. */
+.ctlcap { display: flex; min-width: 0; border-radius: var(--r-sm); }
+.ctlcap.shared {
+  border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden;
+  background: var(--bg-2);
 }
-.chip-t { font: 600 12.5px var(--mono); }
-.chip-s { font-size: 10.5px; color: var(--fg-dim); max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip-n:not(:empty) {
-  position: absolute; top: -5px; right: -5px; min-width: 15px; height: 15px;
+
+.ctlcell {
+  position: relative; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 1px;
+  flex: 1 1 0; min-width: 0; min-height: 46px; padding: 4px 5px;
+  line-height: 1.2; text-align: center;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.ctlcell:hover { background: var(--bg-3); }
+.ctlcell:active { transform: none; }
+/* Inside a shared cap the halves have no outline of their own: the cap owns it, and the seam is a
+   hairline, because a finger cannot choose which half of one keycap it lands on. */
+.ctlcap.shared .ctlcell.half { border: 0; border-radius: 0; }
+.ctlcap.shared .ctlcell.half + .half { box-shadow: inset 1px 0 0 color-mix(in srgb, var(--fg) 22%, transparent); }
+.ctlcap.shared .ctlcell.half[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--accent); }
+/* Density: a control with nothing bound reads quieter than one with several, so the thick parts of
+   a config are visible without opening all sixteen. */
+.ctlcell[data-dens="0"] { background: var(--bg-1); border-color: var(--line-soft); color: var(--fg-faint); }
+.ctlcell[data-dens="0"]:hover { background: var(--bg-2); }
+.ctlcell[data-dens="2"] { background: var(--bg-3); }
+.ctlcell[aria-pressed="true"] {
+  border-color: var(--accent); color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.cc-t { font: 600 12px var(--mono); }
+.featcell .cc-t { font: 600 10.5px var(--sans); letter-spacing: .01em; }
+.cc-s {
+  font-size: 9.5px; color: var(--fg-dim);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctlcell[data-dens="0"] .cc-s { color: var(--fg-faint); }
+/* The count sits INSIDE its own cell's corner: hanging it outside made it ambiguous which of two
+   neighbouring cells it belonged to, and a shared cap clips its overflow anyway. */
+.cc-n:not(:empty) {
+  position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px;
   border-radius: 999px; background: var(--accent); color: var(--accent-fg);
-  font: 600 10px var(--mono); text-align: center; line-height: 15px;
+  font: 600 9.5px var(--mono); text-align: center; line-height: 14px;
+}
+/* The glyphs are the device view's own featureGlyph() output, so they inherit .feat-* styling. */
+.ctlglyph { display: block; pointer-events: none; }
+.ctlcell[aria-pressed="true"] .feat-shape { stroke: var(--fg); }
+.ctlcell[aria-pressed="true"] .feat-knob { fill: color-mix(in srgb, var(--fg) 45%, transparent); stroke: var(--fg); }
+
+/* The rear button is on the BACK of the device: it has no slot on the front grid and is not given
+   a fake one. The dashed rule is the edge of the board. */
+.ctloff {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  width: 100%; max-width: 380px; padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.ctloff .ctlcell { flex: 0 0 auto; min-width: 116px; }
+.ctloff-t { font-size: 11px; color: var(--fg-faint); }
+
+/* The stick's eight sectors, as the compass they are — shown only while the joystick is selected. */
+.ctljoy {
+  display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap;
+  width: 100%; max-width: 480px; padding: 9px 11px 10px;
+  background: var(--bg-2); border: 1px solid var(--line-soft); border-radius: var(--r);
+}
+.ctljoy-side { flex: 1 1 190px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ctljoy-t { font: 600 11px var(--sans); color: var(--fg-dim); }
+.ctljoy-grid { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, 44px); gap: 4px; }
+.ctldir {
+  position: relative; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 0;
+  min-height: 34px; padding: 3px 4px;
+  font: 600 10.5px var(--mono); letter-spacing: .04em;
+  background: var(--bg-1); border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+}
+/* Too small for a corner badge without landing on the letters, so the count sits under them. */
+.ctldir .cc-n:not(:empty) {
+  position: static; background: none; color: var(--accent);
+  min-width: 0; height: auto; padding: 0; line-height: 1.1; font-size: 9px;
+}
+.ctldir:hover { background: var(--bg-3); }
+.ctldir[data-dens="0"] { color: var(--fg-faint); }
+.ctldir[data-dens="2"] { background: var(--bg-3); }
+.ctldir[aria-pressed="true"] {
+  border-color: var(--accent); color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.ctljoy-hub {
+  align-self: center; justify-self: center;
+  width: 8px; height: 8px; border-radius: 999px;
+  border: 1px solid var(--fg-faint);
 }
 
 /* One card per trigger kind. Bound cards read as solid, unbound ones stay quiet. */

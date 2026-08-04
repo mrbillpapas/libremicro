@@ -228,7 +228,13 @@
         </div>
       </div>
 
-      <div class="ctlpick" id="bind-controls" role="group" aria-label="Control to edit"></div>
+      <!-- Which control to edit, picked on a map of the pad rather than from a list: same 4x4 grid
+           as the device view, built from the same geometry. Arrow keys walk it. -->
+      <p class="hint tight">
+        Which control — laid out as the pad itself. Arrow keys walk the grid, Enter selects. The
+        badge counts triggers bound on that control, so a quiet cell has nothing on it.
+      </p>
+      <div class="ctlpick" id="bind-controls" role="group" aria-label="Control to edit, laid out as the pad"></div>
       <p class="hint" id="bind-shared" hidden></p>
 
       <div class="row" id="bind-keymeta">

@@ -1,5 +1,13 @@
 # LibreMicro
 
+<p align="center">
+  <img src="docs/images/device.png" width="620"
+       alt="The Creator Micro 2 drawn to its real geometry: 13 keys on a 4x4 grid, each labelled
+            with its index and what it launches, with the encoder and joystick shown top-left and
+            top-right and the touch pad and three status LEDs bottom-left. Keys 10 and 11 sit
+            under one wide keycap.">
+</p>
+
 Open custom firmware and host tooling for the **Work Louder Creator Micro 2** (CM2)
 macropad — turning it into a fully programmable, AI-native control surface with individually
 addressable per-key RGB.
@@ -8,13 +16,6 @@ addressable per-key RGB.
 > "Creator Micro" are their trademarks, used here only to describe device compatibility.
 > This is an independent interoperability project for hardware you own. Flashing custom
 > firmware will void your warranty. See [docs/RECOVERY.md](docs/RECOVERY.md) to restore stock.
-
-![The LibreMicro web UI: a layout-accurate view of the pad with the underglow drawn as eight
-segments tiling the perimeter, alongside the binding editor](docs/images/webui.png)
-
-*The local web UI. The pad is drawn to its real geometry — 13 switches under 12 keycaps on a 4×4
-grid, eight underglow LEDs tiling the whole perimeter, and the encoder, joystick and touch pad
-shown for orientation. Everything edits one JSON document.*
 
 ## Why
 
@@ -55,6 +56,18 @@ UI. The goal is a full open-source alternative to Work Louder's Input software. 
 
 Phased plan and the calibration constants that had to be measured on hardware:
 [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## The web UI
+
+![The LibreMicro web UI: the device view with the underglow drawn as eight segments tiling the
+perimeter, next to the binding editor](docs/images/webui.png)
+
+Served by the daemon on loopback, no build step and no dependencies. The device view is drawn to
+the pad's real geometry — the underglow tiles the whole perimeter an eighth each, with the corner
+segments wrapping their corner — and the binding editor covers every binding type the schema
+allows, with a shortcut recorder and a Test button per trigger so you can fire a binding without
+touching the pad. It edits the same JSON document the daemon reads; there is no second source of
+truth.
 
 ## Layout
 
