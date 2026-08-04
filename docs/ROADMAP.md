@@ -18,7 +18,9 @@ P=$(./scripts/enter_bootloader.sh)
 
 Then verify in this order: LEDs still light → each key gives exactly one `down` and one `up`
 → **the orientation** (top-left should report `key 0`, bottom-right `key 12`). The web UI's
-event feed shows what arrived. If it's transposed, fix `MTX_TO_LOGICAL` in `firmware/src/main.c`
+event feed shows what arrived. Also check the boot log for `# batt gauge 0x36 acked on SDA=8
+SCL=…`, which settles whether I²C SCL is 18 or 9 — the firmware probes both because this repo's
+notes and the vendor firmware disagree. If it's transposed, fix `MTX_TO_LOGICAL` in `firmware/src/main.c`
 — that's the one assumption left in the key path. Keep [`RECOVERY.md`](RECOVERY.md) open;
 `firmware/README.md` records a boot-loop on an earlier revision.
 
@@ -78,20 +80,22 @@ The first thing a user can actually *use*, and it needs no firmware change.
 - Layout-accurate device view: key rows of **2/4/4/3** and the **3×3-minus-centre** underglow.
 - Click a key or underglow cell to set its colour; palette and effect designer with **live
   preview on the physical pad** while dragging.
-- **Identify sweep** that lights each LED in turn so the strip-index-to-physical-position mapping
-  can be confirmed by eye and written back into the config (see the open question in
-  [`HARDWARE.md`](HARDWARE.md)).
+- **Identify sweep** that lights each LED in turn so the mapping can be confirmed by eye. This
+  did its job: the result is now the shipped default (see [`HARDWARE.md`](HARDWARE.md)), so the
+  sweep is for confirming or correcting a unit rather than a required setup step.
 - Export and import a full configuration bundle.
 
 **Done when:** someone can open a local URL, design a lighting setup by clicking, watch it apply
-to the device in real time, export it, and re-import it on a fresh machine.
+to the device in real time, export it, and re-import it on a fresh machine. ✅
 
 ## Phase 2 — Input events: firmware v2 🟡 **written, not flashed**
 
 The code exists and compiles clean (`firmware/src/main.c`): key matrix scanning, `key <i>
 down`/`up` events carrying **logical** indices, and the batched `kf`/`uf` frame commands.
-Encoder, touch pad and rear button are behind `LM_ENABLE_UNVERIFIED_INPUTS`, off by default,
-until their pins are confirmed.
+Encoder, touch pad and rear button are behind `LM_ENABLE_UNVERIFIED_INPUTS`, off by default —
+their pins *are* now confirmed, but stock's ULP rescue watcher on GPIO 2 can reset the device on
+a rear press and our own flashing procedure is what arms it, so enabling that block is a
+deliberate second step rather than the default.
 
 **What's left is a human flashing it**, then verifying in this order: LEDs still light; each
 key gives exactly one `down` and one `up`; and the orientation — top-left should report
