@@ -13,7 +13,7 @@ import sys
 import threading
 
 from .config import Config, ConfigError
-from .layout import KEY_N
+from .dispatch import Dispatcher
 from .renderer import Renderer
 from .server import serve
 from .transport import Link
@@ -27,7 +27,8 @@ class Daemon:
 
         self.link = Link(port=self.cfg.port, baud=self.cfg.baud,
                          layout=self.cfg.layout, on_event=self.handle_event)
-        self.renderer = Renderer(self.link, self.cfg)
+        self.dispatcher = Dispatcher(self)
+        self.renderer = Renderer(self.link, self.cfg, on_tick=self.dispatcher.tick)
 
         webui = self.cfg.webui
         self._serve_ui = webui.get("enabled", True) if serve_ui is None else serve_ui
@@ -87,6 +88,7 @@ class Daemon:
         self.link.configured_port = cfg.port
         self.link.layout = cfg.layout
         self.renderer.set_config(cfg)
+        self.dispatcher.config_changed()
 
     def reload_config(self) -> bool:
         try:
@@ -101,28 +103,23 @@ class Daemon:
     # --- events -------------------------------------------------------------
 
     def handle_event(self, kind: str, args: list[str]) -> None:
-        """Called from the serial reader thread for each input event line.
+        """Called from the serial reader thread for each firmware event line.
 
-        Phase 3 replaces the body of this with binding dispatch. Until then it keeps the
-        pad from dimming while in use and gives visible proof the event path works.
+        Kept thin on purpose: the reader thread must get back to draining the port, so all
+        the work — recognising hold/double, resolving bindings, running actions — happens in
+        the dispatcher, and actions themselves are spawned rather than awaited.
         """
-        self.renderer.note_activity()
+        self.dispatcher.feed(kind, args)
 
-        if kind == "batt" and args:
-            try:
-                self.battery = {"percent": int(args[0]),
-                                "charging": len(args) > 1 and args[1] == "1"}
-            except ValueError:
-                pass
-            return
+    def inject_event(self, kind: str, args: list[str]) -> None:
+        """Feed a synthetic event as though it came from the device.
 
-        if kind == "key" and len(args) >= 2 and args[1] == "down":
-            try:
-                idx = int(args[0])
-            except ValueError:
-                return
-            if 0 <= idx < KEY_N:
-                self.renderer.flash(idx, "ffffff")
+        The firmware doesn't emit input events yet, so without this there'd be no way to
+        exercise or demo any binding. The web UI uses it to make clicking a key on screen
+        actually launch the app, which also makes the whole dispatch path testable.
+        """
+        print(f"libremicro: injected event: {kind} {' '.join(args)}", flush=True)
+        self.dispatcher.feed(kind, args)
 
 
 def main(argv: list[str] | None = None) -> int:

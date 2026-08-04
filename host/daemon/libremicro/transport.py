@@ -68,6 +68,9 @@ class Link:
         self._last_brightness: int | None = None
         self.events: "queue.Queue[tuple[str, list[str]]]" = queue.Queue()
         self._retry_after = 0.0
+        # Whether this firmware has ever sent an input event. Lets the UI distinguish
+        # "v1 firmware, LED-out only" from "v2, but you haven't pressed anything yet".
+        self.saw_input_event = False
 
     # --- connection ---------------------------------------------------------
 
@@ -151,6 +154,8 @@ class Link:
             return
         head, *rest = line.split()
         if head in EVENT_PREFIXES:
+            if head != "batt":
+                self.saw_input_event = True
             self.events.put((head, rest))
             if self.on_event:
                 try:

@@ -30,9 +30,12 @@ _FLASH_SECONDS = 0.35
 
 
 class Renderer:
-    def __init__(self, link: Link, config: Config):
+    def __init__(self, link: Link, config: Config, on_tick=None):
         self.link = link
         self.cfg = config
+        # Called once per frame. The input recogniser uses it to fire hold and deferred-press
+        # on time, which needs frame resolution rather than the daemon's idle loop.
+        self.on_tick = on_tick
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -237,6 +240,13 @@ class Renderer:
         interval = 1.0 / max(1.0, self.cfg.fps)
         while not self._stop.is_set():
             started = time.monotonic()
+            if self.on_tick is not None:
+                try:
+                    self.on_tick(started)
+                except Exception:
+                    # Input dispatch must not be able to stop rendering, or a bad binding
+                    # would take the lights down with it.
+                    pass
             try:
                 self._tick(started)
             except Exception:

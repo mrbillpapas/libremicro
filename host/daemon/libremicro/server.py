@@ -53,11 +53,27 @@ class Api:
             "port": d.link.port,
             "active_profile": d.cfg.active_profile_name,
             "profiles": d.cfg.profile_names,
-            "active_mode": d.renderer.mode,
+            "active_mode": d.dispatcher.mode,
             "previewing": d.renderer.previewing,
             "layout_verified": d.cfg.layout.verified,
             "battery": d.battery,
+            "input_events": d.link.saw_input_event,
+            "keys": self._key_capabilities(),
         }
+
+    def _key_capabilities(self) -> dict:
+        """Whether keyboard synthesis will actually work, so the UI can warn up front rather
+        than letting shortcuts silently do nothing."""
+        try:
+            from . import keys
+            caps = getattr(keys, "capabilities", None)
+            if callable(caps):
+                return dict(caps() or {})
+            return {"available": True, "reason": "no capability reporting"}
+        except ImportError as exc:
+            return {"available": False, "reason": str(exc)}
+        except Exception as exc:
+            return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
     # --- writes ------------------------------------------------------------
 
@@ -97,6 +113,57 @@ class Api:
         self.daemon.renderer.hold(float(body.get("hold", 4.0)))
         ok = self.daemon.link.identify(target, index)
         return {"ok": ok, "connected": self.daemon.link.connected}
+
+    def simulate(self, body: dict) -> dict:
+        """Inject a synthetic input event, as if the pad had sent it.
+
+        This is how bindings are usable and testable before firmware v2 exists. Accepts
+        either a raw firmware line (`{"line": "key 3 down"}`) or its parts
+        (`{"event": "key", "args": ["3", "down"]}`). A bare key index is expanded to a full
+        down/up pair, since that's what "click this key" means.
+        """
+        line = (body.get("line") or "").strip()
+        if line:
+            parts = line.split()
+            event, args = parts[0], parts[1:]
+        elif body.get("event"):
+            event = str(body["event"])
+            args = [str(a) for a in (body.get("args") or [])]
+        elif body.get("key") is not None:
+            index = int(body["key"])
+            self.daemon.inject_event("key", [str(index), "down"])
+            if body.get("hold_s"):
+                # Let the recogniser see a genuine hold rather than faking the trigger.
+                import time as _t
+                _t.sleep(min(2.0, float(body["hold_s"])))
+            self.daemon.inject_event("key", [str(index), "up"])
+            return {"ok": True, "injected": f"key {index} down/up"}
+        else:
+            return {"ok": False, "errors": ["give one of: line, event+args, or key"]}
+
+        self.daemon.inject_event(event, args)
+        return {"ok": True, "injected": f"{event} {' '.join(args)}".strip()}
+
+    def set_profile(self, body: dict) -> dict:
+        target = body.get("profile") or "next"
+        result = self.daemon.dispatcher.switch_profile(str(target))
+        return {"ok": bool(result), "errors": [] if result else [result.detail],
+                "active_profile": self.daemon.cfg.active_profile_name}
+
+    def set_mode(self, body: dict) -> dict:
+        name = body.get("mode")
+        d = self.daemon.dispatcher
+        if name in (None, "", "none"):
+            with d._lock:
+                d._exit_mode()
+            return {"ok": True, "active_mode": None}
+        if name not in d.modes():
+            return {"ok": False, "errors": [f"no mode named {name!r}"]}
+        d.recognizer.reset()
+        with d._lock:
+            d._mode = str(name)
+        self.daemon.renderer.set_mode(str(name))
+        return {"ok": True, "active_mode": d.mode}
 
     def export(self) -> dict:
         return self.daemon.cfg.export_bundle()
@@ -141,6 +208,9 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/preview/stop": self.api.preview_stop,
             "/api/identify": self.api.identify,
             "/api/import": self.api.import_bundle,
+            "/api/simulate": self.api.simulate,
+            "/api/profile": self.api.set_profile,
+            "/api/mode": self.api.set_mode,
         })
 
     def _mutate(self, routes: dict[str, Callable[[dict], Any]]) -> None:

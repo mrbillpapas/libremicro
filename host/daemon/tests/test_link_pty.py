@@ -200,13 +200,16 @@ class TestLinkOverPty(unittest.TestCase):
         self.assertEqual(self.events, [("key", ["5", "down"])])
 
     def test_a_raising_event_handler_does_not_kill_the_reader(self):
-        boom = Link(port=self.dev.path, layout=Layout({}),
+        # Needs its OWN pty: two Links on one pty race for the same bytes, so whichever
+        # reader wins is arbitrary and the test would be flaky rather than wrong.
+        dev = PtyDevice()
+        boom = Link(port=dev.path, layout=Layout({}),
                     on_event=lambda k, a: (_ for _ in ()).throw(RuntimeError("boom")))
         try:
             self.assertTrue(boom.ensure_connected())
-            self.dev.write_line("key 1 down")
+            dev.write_line("key 1 down")
             time.sleep(0.3)
-            self.dev.write_line("key 2 down")
+            dev.write_line("key 2 down")
             deadline = time.monotonic() + 2.0
             seen = []
             while len(seen) < 2 and time.monotonic() < deadline:
@@ -217,6 +220,7 @@ class TestLinkOverPty(unittest.TestCase):
             self.assertEqual(len(seen), 2, "reader thread died on a handler exception")
         finally:
             boom.close()
+            dev.close()
 
     # --- failure handling ---------------------------------------------------
 
