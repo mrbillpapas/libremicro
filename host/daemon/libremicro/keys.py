@@ -488,12 +488,17 @@ def send_media(action: str) -> bool:
     helper exists. Raises `ValueError` for a token that isn't a media action — including the
     schema's non-media ones (desk_up, lock, ...), which belong to other parts of the daemon.
     """
-    token = canonical_media_action(action)
-    if token is None:
+    # A ':fine' qualifier asks for quarter-step volume: the helper posts the same NX event
+    # with shift+option held, which is the documented macOS gesture for finer increments.
+    # Validate the action name without it, then pass it through.
+    base, sep, qualifier = action.partition(":")
+    token = canonical_media_action(base)
+    if token is None or (sep and qualifier != "fine"):
         raise ValueError(
             f"unknown media action {action!r} "
-            f"(one of: {', '.join(SCHEMA_MEDIA_ACTIONS)})")
-    return _spawn(["media", token])
+            f"(one of: {', '.join(SCHEMA_MEDIA_ACTIONS)}; "
+            f"a volume token may carry ':fine' for quarter steps)")
+    return _spawn(["media", f"{token}:fine" if qualifier == "fine" else token])
 
 
 # --- capability reporting ------------------------------------------------------

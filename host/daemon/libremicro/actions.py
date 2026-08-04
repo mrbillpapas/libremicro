@@ -34,6 +34,7 @@ HOOK_ACTIONS = frozenset({"desk_up", "desk_down", "stand_sit"})
 
 #: Built-ins handled by synthesising the corresponding system media key.
 MEDIA_ACTIONS = {
+    "vol_up": "vol_up:fine", "vol_down": "vol_down:fine",
     "mute": "mute",
     "play_pause": "play_pause", "next_track": "next_track", "prev_track": "prev_track",
     "bright_up": "brightness_up", "bright_down": "brightness_down",
@@ -177,9 +178,6 @@ class Actions:
         return self._spawn(["osascript", "-e", source], what="applescript")
 
     def action(self, token: str, ctx: Context) -> Result:
-        if token in ("vol_up", "vol_down"):
-            return self.nudge_volume(+1 if token == "vol_up" else -1)
-
         if token in MEDIA_ACTIONS:
             keys = self._keys()
             if keys is None:
@@ -214,7 +212,10 @@ class Actions:
         return Result(False, f"unknown action token: {token!r}")
 
     def nudge_volume(self, direction: int) -> Result:
-        """Move system volume by `volume_step` percent. Smooth enough for a dial.
+        """Set system volume directly, by `volume_step` percent.
+
+        Not used by vol_up/vol_down any more — those use the fine media keys, which keep the
+        on-screen overlay. Kept because it is the only way to get an arbitrary step size.
 
         The level is cached and advanced locally so a fast spin doesn't have to wait on an
         osascript read per detent — reading takes tens of milliseconds, which a dial would

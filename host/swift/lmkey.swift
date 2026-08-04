@@ -380,12 +380,21 @@ func sendChord(_ chord: Chord, delayUS: UInt32) -> Bool {
 
 // MARK: - media
 
-func postAux(_ code: Int32, down: Bool) -> Bool {
+func postAux(_ code: Int32, down: Bool, extraFlags: CGEventFlags = []) -> Bool {
     let state: Int32 = down ? 0xA : 0xB
     let data1 = Int((code << 16) | (state << 8))
+    // 0xA00 is the standard "aux control" marker the system expects in an NX event.
+    var raw: UInt = 0xA00
+    // macOS reads the modifier state to decide the volume STEP SIZE: shift+option gives
+    // quarter increments. The flags have to be on the NX event itself, so they get folded
+    // into both the NSEvent modifier mask and the resulting CGEvent's flags.
+    if extraFlags.contains(.maskShift)      { raw |= UInt(NSEvent.ModifierFlags.shift.rawValue) }
+    if extraFlags.contains(.maskAlternate)  { raw |= UInt(NSEvent.ModifierFlags.option.rawValue) }
+    if extraFlags.contains(.maskControl)    { raw |= UInt(NSEvent.ModifierFlags.control.rawValue) }
+    if extraFlags.contains(.maskCommand)    { raw |= UInt(NSEvent.ModifierFlags.command.rawValue) }
     guard let ev = NSEvent.otherEvent(with: .systemDefined,
                                       location: .zero,
-                                      modifierFlags: NSEvent.ModifierFlags(rawValue: 0xA00),
+                                      modifierFlags: NSEvent.ModifierFlags(rawValue: raw),
                                       timestamp: 0,
                                       windowNumber: 0,
                                       context: nil,
@@ -394,21 +403,29 @@ func postAux(_ code: Int32, down: Bool) -> Bool {
                                       data2: -1),
           let cg = ev.cgEvent
     else { return false }
+    if !extraFlags.isEmpty { cg.flags = cg.flags.union(extraFlags) }
     if !dryRun { cg.post(tap: .cghidEventTap) }
     return true
 }
 
-func sendMedia(_ token: String, delayUS: UInt32) throws -> Bool {
-    let t = token.trimmingCharacters(in: .whitespaces).lowercased()
+func sendMedia(_ token: String, delayUS: UInt32, fine: Bool = false) throws -> Bool {
+    var t = token.trimmingCharacters(in: .whitespaces).lowercased()
+    // `vol_up:fine` / `vol_down:fine` — quarter-step volume, which is what a rotary dial
+    // wants. Holding shift+option while pressing a volume key is a documented macOS
+    // behaviour; synthesising the same modifier state gets the same quarter steps AND keeps
+    // the on-screen volume overlay, which setting the level via AppleScript does not.
+    var wantFine = fine
+    if t.hasSuffix(":fine") { wantFine = true; t = String(t.dropLast(5)) }
     let canonical = mediaCodes[t] != nil ? t : mediaAliases[t]
     guard let name = canonical, let code = mediaCodes[name] else {
         throw LMError.bad("unknown media action '\(token)' "
                           + "(vol_up, vol_down, mute, play_pause, next_track, prev_track, "
-                          + "bright_up, bright_down)")
+                          + "bright_up, bright_down; add ':fine' to a volume token)")
     }
-    var ok = postAux(code, down: true)
+    let flags: CGEventFlags = wantFine ? [.maskShift, .maskAlternate] : []
+    var ok = postAux(code, down: true, extraFlags: flags)
     usleep(delayUS)
-    ok = postAux(code, down: false) && ok
+    ok = postAux(code, down: false, extraFlags: flags) && ok
     return ok
 }
 
@@ -592,10 +609,13 @@ case "chord", "key", "shortcut":
 case "media":
     if operands.isEmpty { die("media: needs an action, e.g. '\(programName) media play_pause'") }
     for token in operands {
-        let t = token.trimmingCharacters(in: .whitespaces).lowercased()
+        var t = token.trimmingCharacters(in: .whitespaces).lowercased()
+        // Strip the ':fine' qualifier before validating the action name.
+        if t.hasSuffix(":fine") { t = String(t.dropLast(5)) }
         if mediaCodes[t] == nil && mediaAliases[t] == nil {
             die("unknown media action '\(token)' (vol_up, vol_down, mute, play_pause, "
-                + "next_track, prev_track, bright_up, bright_down)")
+                + "next_track, prev_track, bright_up, bright_down; add ':fine' to a "
+                + "volume token for quarter steps)")
         }
     }
     requireAccessibility()

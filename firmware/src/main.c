@@ -233,7 +233,7 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 // clockwise depends on PCB wiring and is NOT in the vendor firmware, so this is the one
 // knob that can only be set by turning the knob. Flip it if cw/ccw come out backwards.
 #ifndef LM_ENC_INVERT
-#define LM_ENC_INVERT 0
+#define LM_ENC_INVERT 1   // measured on hardware: clockwise was reporting ccw
 #endif
 
 #define LM_AUX_POLL_MS  2    // poll period for the guarded inputs

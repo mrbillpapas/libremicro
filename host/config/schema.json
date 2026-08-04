@@ -97,7 +97,7 @@
           "default": 280
         },
         "volume_step": {
-          "description": "Percent of system volume per vol_up/vol_down. Volume deliberately bypasses the media keys, which snap to macOS's 16-step grid (~6.25% a press) \u2014 far too coarse for a rotary dial. Lower this for a finer feel; the trade is losing the on-screen volume overlay.",
+          "description": "Percent per step for the absolute-volume helper. NOTE: vol_up/vol_down do NOT use this \u2014 they press the real media keys with shift+option held, which is macOS's documented gesture for quarter-step volume, so they get fine increments AND keep the on-screen volume overlay. This setting only applies if something calls the absolute setter directly, which trades the overlay away for an arbitrary step size.",
           "type": "integer",
           "minimum": 1,
           "maximum": 25,
