@@ -123,32 +123,83 @@ class TestLayout(unittest.TestCase):
             with self.assertRaises(IndexError):
                 layout.logical_to_rowcol(bad)
 
-    def test_narrow_rows_are_centred(self):
-        # Row 0 has 2 keys against a widest row of 4, so it should sit inside the span.
-        xs = [layout.key_xy(i)[0] for i in (0, 1)]
-        self.assertTrue(all(0.0 < x < 1.0 for x in xs))
-        self.assertAlmostEqual(sum(xs) / 2, 0.5, places=6)
+    def test_confirmed_grid_columns(self):
+        # From the faceplate: the encoder and joystick take row 0's outer slots, and the
+        # touch pad takes row 3's leftmost — so row 0 is centred but row 3 is RIGHT-aligned.
+        self.assertEqual(layout.KEY_GRID_COLS, ((1, 2), (0, 1, 2, 3), (0, 1, 2, 3), (1, 2, 3)))
+        self.assertEqual([layout.grid_col(0, o) for o in range(2)], [1, 2])
+        self.assertEqual([layout.grid_col(3, o) for o in range(3)], [1, 2, 3])
+
+    def test_row_zero_is_centred_row_three_is_not(self):
+        xs_top = [layout.key_xy(i)[0] for i in (0, 1)]
+        self.assertAlmostEqual(sum(xs_top) / 2, 0.5, places=6)
+        xs_bottom = [layout.key_xy(i)[0] for i in (10, 11, 12)]
+        self.assertAlmostEqual(max(xs_bottom), 1.0, places=6)   # reaches the right edge
+        self.assertGreater(min(xs_bottom), 0.0)                  # but not the left
+
+    def test_grid_col_rejects_empty_slots(self):
+        with self.assertRaises(IndexError):
+            layout.grid_col(0, 2)     # row 0 only has two keys
+
+    def test_shared_keycap_pairs_10_and_11(self):
+        # 13 switches, 12 caps: the wide bottom cap covers two switches.
+        self.assertEqual(layout.shared_cap_for(10), (10, 11))
+        self.assertEqual(layout.shared_cap_for(11), (10, 11))
+        self.assertIsNone(layout.shared_cap_for(12))
+        self.assertEqual(sum(len(g) for g in layout.SHARED_KEYCAPS), 2)
+
+    def test_shared_cap_keys_are_horizontally_adjacent(self):
+        for group in layout.SHARED_KEYCAPS:
+            rows = {layout.logical_to_rowcol(i)[0] for i in group}
+            self.assertEqual(len(rows), 1, "a shared cap must sit in one row")
+            cols = sorted(layout.key_xy(i)[0] for i in group)
+            self.assertEqual(len(cols), len(set(cols)))
+
+    def test_features_occupy_the_three_empty_slots(self):
+        occupied = {(r, layout.grid_col(r, o))
+                    for r in range(len(layout.KEY_ROWS))
+                    for o in range(layout.KEY_ROWS[r])}
+        for name, pos in layout.FEATURES.items():
+            self.assertNotIn(pos, occupied, f"{name} overlaps a key slot")
+        self.assertEqual(len(layout.FEATURES), 16 - layout.KEY_N)
 
     def test_underglow_ring_covers_grid_minus_centre(self):
         cells = set(layout.UNDERGLOW_RING)
         self.assertEqual(len(cells), 8)
         self.assertNotIn((1, 1), cells)
 
-    def test_identity_mapping_when_unverified(self):
+    def test_defaults_are_the_confirmed_hardware_mapping(self):
+        # Every Creator Micro 2 is wired identically, so an empty config must already be
+        # correct — a user should never have to run a sweep to get working effects.
         lo = layout.Layout({})
-        self.assertFalse(lo.verified)
-        self.assertEqual(lo.logical_to_strip, list(range(13)))
-
-    def test_config_mapping_is_applied(self):
-        # Strip index 0 sits at row 3 position 2, i.e. logical 12.
-        lo = layout.Layout({"key_positions": [[3, 2]], "verified": True})
         self.assertTrue(lo.verified)
-        self.assertEqual(lo.strip_to_logical[0], 12)
+        self.assertEqual(lo.strip_to_logical[0], 12, "strip index 0 is the bottom-right key")
         self.assertEqual(lo.logical_to_strip[12], 0)
+        self.assertEqual(lo.strip_to_ring[0], layout.UNDERGLOW_RING.index((2, 2)))
 
-    def test_bad_mapping_falls_back_to_identity(self):
-        lo = layout.Layout({"key_positions": [[9, 9]]})
+    def test_default_key_wiring_is_a_serpentine(self):
+        # Consecutive strip indices must be physically adjacent — that's what makes a chase
+        # look like a chase. Adjacent means same row one column over, or a row step at an end.
+        pts = [layout.key_xy(layout.rowcol_to_logical(r, o))
+               for r, o in layout.DEFAULT_KEY_POSITIONS]
+        for i, (a, b) in enumerate(zip(pts, pts[1:])):
+            step = max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+            self.assertLessEqual(step, 1 / 3 + 1e-9, f"strip {i}->{i+1} jumps across the pad")
+
+    def test_default_underglow_wiring_is_a_continuous_ring(self):
+        slots = [layout.UNDERGLOW_RING.index(p) for p in layout.DEFAULT_UNDERGLOW_POSITIONS]
+        self.assertEqual(sorted(slots), list(range(8)), "each ring position used exactly once")
+        for a, b in zip(slots, slots[1:] + slots[:1]):
+            self.assertEqual(min(abs(a - b), 8 - abs(a - b)), 1, "ring order has a gap")
+
+    def test_config_mapping_overrides_the_default(self):
+        lo = layout.Layout({"key_positions": [[0, 0]], "verified": False})
+        self.assertFalse(lo.verified)
         self.assertEqual(lo.strip_to_logical[0], 0)
+
+    def test_bad_mapping_still_yields_a_usable_bijection(self):
+        lo = layout.Layout({"key_positions": [[9, 9]]})
+        self.assertEqual(sorted(lo.strip_to_logical), list(range(13)))
 
 
 class TestFrame(unittest.TestCase):
@@ -264,7 +315,11 @@ class TestFrameDiffing(unittest.TestCase):
         nxt = prev.copy()
         nxt.keys[5] = color.parse_hex("ff0000")
         lines = list(self.link._frame_lines(nxt, prev))
-        self.assertEqual(lines, ["k 5 ff0000"])
+        # Frames are indexed by LOGICAL key; the wire carries the STRIP index, so with the
+        # confirmed serpentine wiring these are deliberately different numbers.
+        strip = self.link.layout.logical_to_strip[5]
+        self.assertEqual(lines, [f"k {strip} ff0000"])
+        self.assertNotEqual(strip, 5, "serpentine wiring should not be identity here")
 
     def test_status_leds_are_diffed_too(self):
         prev = Frame(status=[0, 0, 0])
@@ -352,6 +407,19 @@ class TestConfig(unittest.TestCase):
         cfg = config.Config.load(config.EXAMPLE_PATH)
         self.assertEqual(cfg.path, config.EXAMPLE_PATH)
         self.assertEqual(cfg.save_path, config.USER_CONFIG_PATH)
+
+    def test_relative_path_to_the_example_still_redirects(self):
+        # Regression: the daemon is normally started as `-c host/config/example.json`, so
+        # self.path was relative while EXAMPLE_PATH is absolute. A plain == compared them as
+        # different files, and web UI saves landed on the repo's template.
+        import os as _os
+        cwd = _os.getcwd()
+        try:
+            _os.chdir(config.HERE.parents[3])
+            cfg = config.Config.load("host/config/example.json")
+            self.assertEqual(cfg.save_path, config.USER_CONFIG_PATH)
+        finally:
+            _os.chdir(cwd)
 
     def test_save_path_keeps_an_explicit_path(self):
         cfg = config.Config({"version": 2, "profiles": {"default": {}}})

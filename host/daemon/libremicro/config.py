@@ -219,7 +219,9 @@ class Config:
                 raw = json.loads(candidate.read_text())
             except json.JSONDecodeError as exc:
                 raise ConfigError(f"{candidate}: invalid JSON — {exc}") from exc
-            cfg = cls(raw, candidate)
+            # Store an absolute path so later comparisons (see save_path) can't be fooled
+            # by how the config was spelled on the command line.
+            cfg = cls(raw, candidate.expanduser().resolve())
             errors = validate(cfg.doc)
             hard = [e for e in errors if not e.endswith("skipped validation")]
             if hard:
@@ -237,7 +239,7 @@ class Config:
         writing to it would both clobber it and show up as a dirty git tree. A config that
         was loaded from the example graduates to the user's own config path on first save.
         """
-        if self.path is None or self.path == EXAMPLE_PATH:
+        if self.path is None or _same_file(self.path, EXAMPLE_PATH):
             return USER_CONFIG_PATH
         return self.path
 
@@ -278,6 +280,19 @@ class Config:
         if errors:
             raise ConfigError("bundle failed validation:\n  " + "\n  ".join(errors))
         return cfg
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether two paths name the same file, regardless of how they were spelled.
+
+    Comparing Path objects directly is not enough: the daemon is normally started as
+    `-c host/config/example.json`, so self.path is relative while EXAMPLE_PATH is absolute,
+    and a plain `==` silently reports them as different files.
+    """
+    try:
+        return a.expanduser().resolve() == b.expanduser().resolve()
+    except OSError:
+        return False
 
 
 def _relative_schema(target: Path) -> str:

@@ -18,30 +18,78 @@ capacitive touch pad, rear button.
 Driven with Espressif's `led_strip` component, SPI backend. Stock is byte-identical upstream
 `led_strip` v3.0.x; a v2.5.5 build emits the same WS2812 waveform.
 
-### Physical geometry
+### Physical geometry — CONFIRMED from the faceplate
 
-Needed for spatial lighting effects (gradients, ripples, ring chases) and for the web UI's
-layout view.
+Everything sits on one **4×4 grid**. 13 of the 16 slots are key switches; the other three are
+taken by non-key controls, which is exactly why the short rows sit where they do:
 
-- **Key caps:** 4 rows of **2, 4, 4, 3** = 13. This matches the 4×4 scanned matrix with 3 of 16
-  slots unpopulated (2 missing in the 2-key row, 1 in the 3-key row).
-- **Underglow:** a **3×3 grid with no centre LED** = 8, i.e. a ring of positions
-  `(0,0) (1,0) (2,0) / (0,1) — (2,1) / (0,2) (1,2) (2,2)`.
+```
+row 0:  [encoder]   key        key        [joystick]
+row 1:   key        key        key         key
+row 2:   key        key        key         key
+row 3:  [touch]    (----- wide cap -----)  key
+                    two switches, one cap
+```
 
-### Open question: strip index → physical position (UNVERIFIED)
+- **Key switches:** 4 rows of **2, 4, 4, 3** = 13, occupying grid columns `(1,2)`,
+  `(0,1,2,3)`, `(0,1,2,3)`, `(1,2,3)`. So the 2-key row is centred and the 3-key row is
+  *right*-aligned — not a symmetric layout.
+- **13 switches but only 12 keycaps.** The wide cap in the bottom row covers **two
+  independent switches with two independent LEDs**. A user can't reliably choose which half
+  they press, so binding the two halves to different actions is a footgun — treat them as one
+  control that happens to have two LEDs (a two-pixel gradient across one cap is the nice use
+  for it).
+- **Non-key controls:** rotary encoder at `(0,0)`, radial joystick at `(0,3)`, capacitive
+  touch pad at `(3,0)`. The three PWM status LEDs sit beside the touch pad at bottom-left.
+- **Underglow:** a **3×3 grid with no centre LED** = 8, all **the same physical size**, evenly
+  spaced around the square — three across the top, one at each side midpoint, three across the
+  bottom.
 
-Three separate mappings are **not yet confirmed** and must not be guessed at in code:
+### Strip index → physical position — CONFIRMED by identify sweep
 
-1. Which of the 4 matrix columns are populated in the 2-key row and the 3-key row.
-2. Which physical cap each of the 13 per-key strip indices (GPIO 7, order 0→12) lights — strip
-   wiring order need not match matrix index order.
-3. Which of the 8 ring positions each underglow strip index (GPIO 6, order 0→7) lights, and
-   which direction the ring runs.
+Both LED chains are wired as a **serpentine starting at the bottom-right**. Confirmed by
+lighting one pixel at a time on real hardware; every consecutive index turned out to be
+physically adjacent, which is exactly what real strip wiring looks like and is strong
+evidence the reading is right.
 
-All three are cheap to settle empirically: light one LED at a time and look at the pad. The
-Phase 1 "identify sweep" in [`ROADMAP.md`](ROADMAP.md) exists for exactly this. Keep the
-resulting mapping in **config, not source**, so correcting it is a data change rather than a
-code change — and so a future hardware revision with different wiring is a config swap.
+**Per-key chain (GPIO 7)** — strip index by physical position, left to right:
+
+| Row | Strip indices (left → right) |
+|---|---|
+| 0 (top)    | `11 12` (grid cols 1–2) |
+| 1          | `10 9 8 7` |
+| 2          | `6 5 4 3`  → i.e. `3 4 5 6` left-to-right |
+| 3 (bottom) | `2 1 0` (grid cols 1–3) |
+
+So it snakes upward: row 3 right-to-left, row 2 left-to-right, row 1 right-to-left, row 0
+left-to-right. **Strip index 0 is the bottom-right key, not the top-left.**
+
+**Underglow chain (GPIO 6)** — also starts bottom-right, consistent with a single wiring
+entry point, and runs continuously around the ring:
+
+```
+0:(2,2) → 1:(1,2) → 2:(0,2) → 3:(0,1) → 4:(0,0) → 5:(1,0) → 6:(2,0) → 7:(2,1)
+   bottom-right → bottom-mid → bottom-left → mid-left → top-left → top-mid → top-right → mid-right
+```
+
+This is a property of the board, so **every Creator Micro 2 is wired identically**. It
+therefore ships as a **source default** (`DEFAULT_KEY_POSITIONS` /
+`DEFAULT_UNDERGLOW_POSITIONS` in `host/daemon/libremicro/layout.py`) rather than something
+each owner rediscovers — a new user gets correct spatial effects with an empty config.
+`layout.key_positions` / `layout.underglow_positions` still override it, for a future
+hardware revision or a unit that turns out to differ; setting `layout.verified: false`
+alongside an override is what re-enables the "unverified" warning.
+
+### Still open: matrix column order
+
+One mapping remains, and it only matters once input events exist (Phase 2): whether the
+matrix column order (GPIO 13, 5, 21, 1) runs left-to-right physically. The grid above is
+*physical* geometry; the matrix→physical column mapping is independent of it and cannot be
+determined from the LEDs.
+
+The canonical machine-readable form of all of the above is
+`host/daemon/libremicro/layout.py` (`KEY_GRID_COLS`, `SHARED_KEYCAPS`, `FEATURES`,
+`UNDERGLOW_RING`, `DEFAULT_KEY_POSITIONS`, `DEFAULT_UNDERGLOW_POSITIONS`).
 
 ## The LED power rail (the thing that made custom firmware stay dark)
 

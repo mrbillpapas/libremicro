@@ -146,9 +146,11 @@ deliberately last: the tethered USB experience is where the interesting product 
   still progress; Phases 3–7 do not.
 - **The rear-button / ext0-wake pin conflict** blocks both Phase 2 and Phase 8. Resolve it once,
   early — it's cheap now and expensive later.
-- **LED index mapping is unverified.** Effects that are spatial (gradients, ripples, ring chases)
-  are only correct once index-to-position is confirmed. The Phase 1 identify sweep is the fix, and
-  keeping the mapping in config rather than in code means correcting it is a data change.
+- ~~**LED index mapping is unverified.**~~ **Resolved.** Both chains were confirmed on hardware
+  by identify sweep: a serpentine starting bottom-right (see `HARDWARE.md`). Because the wiring
+  is identical on every Creator Micro 2, it now ships as a source default rather than per-user
+  config, so spatial effects are correct out of the box. Config override remains for a future
+  hardware revision.
 - **Reflashing has real failure modes.** Firmware phases (2, 8, 9) each carry boot-loop risk; keep
   [`RECOVERY.md`](RECOVERY.md) current and take a flash backup before each firmware milestone.
 - **Don't build the feature matrix.** Matching Work Louder Input feature-for-feature is the

@@ -94,7 +94,9 @@ class TestLinkOverPty(unittest.TestCase):
         nxt = base.copy()
         nxt.keys[7] = parse_hex("00ff88")
         self.link.send_frame(nxt)
-        self.assertEqual(self.dev.read_lines(), ["k 7 00ff88"])
+        # Logical 7 -> its strip index under the confirmed serpentine wiring.
+        strip = self.link.layout.logical_to_strip[7]
+        self.assertEqual(self.dev.read_lines(), [f"k {strip} 00ff88"])
 
     def test_unchanged_frame_writes_nothing(self):
         f = Frame([parse_hex("123456")] * 13)
