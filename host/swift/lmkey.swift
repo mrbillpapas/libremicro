@@ -383,18 +383,15 @@ func sendChord(_ chord: Chord, delayUS: UInt32) -> Bool {
 func postAux(_ code: Int32, down: Bool, extraFlags: CGEventFlags = []) -> Bool {
     let state: Int32 = down ? 0xA : 0xB
     let data1 = Int((code << 16) | (state << 8))
-    // 0xA00 is the standard "aux control" marker the system expects in an NX event.
-    var raw: UInt = 0xA00
-    // macOS reads the modifier state to decide the volume STEP SIZE: shift+option gives
-    // quarter increments. The flags have to be on the NX event itself, so they get folded
-    // into both the NSEvent modifier mask and the resulting CGEvent's flags.
-    if extraFlags.contains(.maskShift)      { raw |= UInt(NSEvent.ModifierFlags.shift.rawValue) }
-    if extraFlags.contains(.maskAlternate)  { raw |= UInt(NSEvent.ModifierFlags.option.rawValue) }
-    if extraFlags.contains(.maskControl)    { raw |= UInt(NSEvent.ModifierFlags.control.rawValue) }
-    if extraFlags.contains(.maskCommand)    { raw |= UInt(NSEvent.ModifierFlags.command.rawValue) }
+    // 0xA00 must be passed through EXACTLY. In a system-defined aux event this field is not
+    // a normal modifier mask — it is a marker the window server matches on, and ORing real
+    // modifier bits into it breaks the pairing of the key-up to its key-down. The symptom is
+    // brutal and was observed: the key latches, auto-repeats, and pins volume at a rail
+    // where even `set volume` cannot move it. Modifier state rides on the CGEvent's flags
+    // instead, which is what macOS actually reads to pick the quarter-step size.
     guard let ev = NSEvent.otherEvent(with: .systemDefined,
                                       location: .zero,
-                                      modifierFlags: NSEvent.ModifierFlags(rawValue: raw),
+                                      modifierFlags: NSEvent.ModifierFlags(rawValue: 0xA00),
                                       timestamp: 0,
                                       windowNumber: 0,
                                       context: nil,
@@ -403,7 +400,6 @@ func postAux(_ code: Int32, down: Bool, extraFlags: CGEventFlags = []) -> Bool {
                                       data2: -1),
           let cg = ev.cgEvent
     else { return false }
-    if !extraFlags.isEmpty { cg.flags = cg.flags.union(extraFlags) }
     if !dryRun { cg.post(tap: .cghidEventTap) }
     return true
 }
@@ -422,10 +418,47 @@ func sendMedia(_ token: String, delayUS: UInt32, fine: Bool = false) throws -> B
                           + "(vol_up, vol_down, mute, play_pause, next_track, prev_track, "
                           + "bright_up, bright_down; add ':fine' to a volume token)")
     }
-    let flags: CGEventFlags = wantFine ? [.maskShift, .maskAlternate] : []
-    var ok = postAux(code, down: true, extraFlags: flags)
+    // Fine steps need shift+option genuinely HELD around the key press, exactly as a human
+    // would do it — posted as real modifier key events so the window server's global
+    // modifier state is what changes. Putting the flags on the aux event instead (either in
+    // its marker field or on its CGEvent flags) breaks the pairing of the key-up to its
+    // key-down: the key latches, auto-repeats, and drives volume to a rail where even
+    // `set volume` cannot move it. Both variants were tried and both failed that way.
+    // Fine steps need shift+option genuinely HELD around the key press, exactly as a human
+    // would do it. Posted through the SAME tables and ordering sendChord uses, because that
+    // path is known to leave no modifier behind.
+    //
+    // Why not simply flag the aux event: putting the modifiers in its marker field, or on
+    // its CGEvent flags, breaks the pairing of the key-up to its key-down. Both were tried
+    // and both latched the key — it then auto-repeats and drives volume to a rail where even
+    // `set volume` cannot move it. `lmkey auxrelease` exists to recover from that.
+    let holds = wantFine ? ["shift", "option"] : []
+    var accumulated: CGEventFlags = []
+    var pressed: [String] = []
+    var ok = true
+
+    for name in modifierOrder where holds.contains(name) {
+        accumulated.insert(modifierFlags[name] ?? [])
+        guard let code = modifierKeyCodes[name] else { continue }
+        ok = post(code, down: true, flags: accumulated) && ok
+        pressed.append(name)
+        usleep(delayUS)
+    }
+
+    ok = postAux(code, down: true) && ok
     usleep(delayUS)
-    ok = postAux(code, down: false, extraFlags: flags) && ok
+    ok = postAux(code, down: false) && ok
+
+    for name in pressed.reversed() {
+        accumulated.remove(modifierFlags[name] ?? [])
+        usleep(delayUS)
+        if let kc = modifierKeyCodes[name] {
+            ok = post(kc, down: false, flags: accumulated) && ok
+        }
+    }
+    // Let the window server settle before we return, so a caller that immediately fires
+    // another one cannot interleave with our modifier release.
+    if wantFine { usleep(delayUS * 2) }
     return ok
 }
 
@@ -604,6 +637,46 @@ case "chord", "key", "shortcut":
         ok = sendChord(chord, delayUS: delayUS) && ok
     }
     if !ok { die("failed to create a key event", exitPostFailed) }
+    exit(exitOK)
+
+case "mods":
+    // Report the modifier flags the system currently believes are held, and optionally
+    // release them. A synthesised key-down whose key-up went missing leaves the system
+    // auto-repeating, which is indistinguishable from a hardware key being physically
+    // stuck — and impossible to diagnose without being able to see this state.
+    let live = CGEventSource.flagsState(.combinedSessionState)
+    var held: [String] = []
+    if live.contains(.maskShift)      { held.append("shift") }
+    if live.contains(.maskAlternate)  { held.append("option") }
+    if live.contains(.maskControl)    { held.append("control") }
+    if live.contains(.maskCommand)    { held.append("command") }
+    if live.contains(.maskSecondaryFn){ held.append("fn") }
+    print("held: \(held.isEmpty ? "none" : held.joined(separator: "+"))  raw=0x\(String(live.rawValue, radix: 16))")
+    if operands.contains("release") {
+        requireAccessibility()
+        // Post an explicit key-up for each modifier keycode, with no flags, which is what
+        // clears a latched modifier.
+        for kc in [CGKeyCode(56), CGKeyCode(60), CGKeyCode(58), CGKeyCode(61),
+                   CGKeyCode(59), CGKeyCode(62), CGKeyCode(55), CGKeyCode(54), CGKeyCode(63)] {
+            _ = post(kc, down: false, flags: [])
+            usleep(1000)
+        }
+        let after = CGEventSource.flagsState(.combinedSessionState)
+        print("after release: raw=0x\(String(after.rawValue, radix: 16))")
+    }
+    exit(exitOK)
+
+case "auxrelease":
+    // Post a bare key-UP for every aux/media code, with no preceding key-down. This is the
+    // escape hatch for a latched media key: if a synthesised down loses its up, the system
+    // auto-repeats forever, which pins volume at a rail and makes it refuse to be set at
+    // all. Harmless when nothing is stuck, since an unmatched up is simply ignored.
+    requireAccessibility()
+    for (_, code) in mediaCodes {
+        _ = postAux(code, down: false)
+        usleep(2000)
+    }
+    print("released all aux keys")
     exit(exitOK)
 
 case "media":

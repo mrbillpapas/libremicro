@@ -34,18 +34,26 @@ HOOK_ACTIONS = frozenset({"desk_up", "desk_down", "stand_sit"})
 
 #: Built-ins handled by synthesising the corresponding system media key.
 MEDIA_ACTIONS = {
-    "vol_up": "vol_up:fine", "vol_down": "vol_down:fine",
     "mute": "mute",
     "play_pause": "play_pause", "next_track": "next_track", "prev_track": "prev_track",
     "bright_up": "brightness_up", "bright_down": "brightness_down",
 }
 
-#: Volume is deliberately NOT a media key. The system volume keys snap to macOS's 16-step
-#: grid — about 6.25% per press — which is fine for a keyboard and far too coarse for a
-#: rotary encoder, where a slow turn should feel continuous. Setting the level directly gives
-#: us any step size we like. The cost is losing the on-screen volume overlay, which is a
-#: trade worth making for a dial.
+#: Volume has two implementations with a genuine trade between them, so it's a config choice
+#: rather than a decision made on the user's behalf:
+#:
+#:   "fine"   (default) sets the level directly. Any step size you like — device.volume_step,
+#:            default 3% — but macOS shows no volume overlay for a programmatic set.
+#:   "coarse" presses the real media key. You get the overlay, but macOS snaps to its own
+#:            16-step grid, ~6.25% a press, which is chunky under a rotary dial.
+#:
+#: What is NOT on offer, despite being the obvious idea: the media key with shift+option
+#: held, which is how a human gets quarter steps. Measured on hardware, that does nothing for
+#: a synthesised event — macOS doesn't consult held modifier state when sizing the step of an
+#: injected aux event — and putting the modifiers onto the event itself latches the key, which
+#: then auto-repeats and drives volume to a rail. See host/swift/lmkey.swift.
 VOLUME_STEP_DEFAULT = 3
+VOLUME_MODE_DEFAULT = "fine"
 
 _VOL_GET = 'output volume of (get volume settings)'
 _VOL_MUTED = 'output muted of (get volume settings)'
@@ -95,11 +103,13 @@ class Actions:
     profile switching and config reload are its business, not this module's."""
 
     def __init__(self, on_profile=None, on_reload=None,
-                 volume_step: int = VOLUME_STEP_DEFAULT):
+                 volume_step: int = VOLUME_STEP_DEFAULT,
+                 volume_mode: str = VOLUME_MODE_DEFAULT):
         self._on_profile = on_profile
         self._on_reload = on_reload
         self._lock = threading.Lock()
         self.volume_step = volume_step
+        self.volume_mode = volume_mode
         self._volume: int | None = None
         self._volume_at = 0.0
 
@@ -178,6 +188,16 @@ class Actions:
         return self._spawn(["osascript", "-e", source], what="applescript")
 
     def action(self, token: str, ctx: Context) -> Result:
+        if token in ("vol_up", "vol_down"):
+            direction = +1 if token == "vol_up" else -1
+            if self.volume_mode == "coarse":
+                keys = self._keys()
+                if keys is None:
+                    return Result(False, "key synthesis unavailable")
+                return Result(bool(keys.send_media(
+                    "vol_up" if direction > 0 else "vol_down")))
+            return self.nudge_volume(direction)
+
         if token in MEDIA_ACTIONS:
             keys = self._keys()
             if keys is None:

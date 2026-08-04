@@ -109,6 +109,7 @@ class Api:
     # --- writes ------------------------------------------------------------
 
     def put_config(self, body: dict) -> dict:
+        self.daemon.renderer.note_activity()
         try:
             cfg = Config(body)
         except ConfigError as exc:
@@ -120,10 +121,12 @@ class Api:
         return {"ok": True, "errors": []}
 
     def preview_frame(self, body: dict) -> dict:
+        self.daemon.renderer.note_activity()
         self.daemon.renderer.preview_frame(Frame.from_hex(body), ttl=float(body.get("ttl", 5.0)))
         return {"ok": True}
 
     def preview_effect(self, body: dict) -> dict:
+        self.daemon.renderer.note_activity()
         spec = body.get("effect") or {}
         try:
             self.daemon.renderer.preview_effect(spec)
@@ -132,10 +135,12 @@ class Api:
         return {"ok": True}
 
     def preview_stop(self, body: dict) -> dict:
+        self.daemon.renderer.note_activity()
         self.daemon.renderer.preview_stop()
         return {"ok": True}
 
     def identify(self, body: dict) -> dict:
+        self.daemon.renderer.note_activity()
         target = body.get("target", "keys")
         index = int(body.get("index", 0))
         # Hold the render loop off the strips entirely — a preview frame would still be a

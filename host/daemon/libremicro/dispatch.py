@@ -40,7 +40,8 @@ class Dispatcher:
         self._now = time.monotonic()
         self.actions = Actions(on_profile=self.switch_profile,
                                on_reload=self._reload,
-                               volume_step=int(self.cfg.device.get("volume_step", 3)))
+                               volume_step=int(self.cfg.device.get("volume_step", 3)),
+                               volume_mode=str(self.cfg.device.get("volume_mode", "fine")))
         self.recognizer = events.Recognizer(
             emit=self.handle, is_bound=self.is_bound,
             hold_ms=int(self.cfg.device.get("hold_ms", events.DEFAULT_HOLD_MS)),
