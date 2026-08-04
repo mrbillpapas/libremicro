@@ -37,3 +37,8 @@ scripts/wlrpc
 
 # Vendor-derived output from tools/extract_sources.py — NEVER commit.
 extracted-src/
+
+# Own-PCB design work — kept local for now, not part of the published project.
+docs/OPEN-PCB.md
+docs/pcb/
+hardware/

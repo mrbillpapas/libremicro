@@ -1,78 +1,146 @@
 {
   "$schema": "./schema.json",
   "version": 2,
-
   "device": {
     "port": "auto",
     "brightness": 200,
     "fps": 30
   },
-
   "palettes": {
     "sunset": {
       "label": "Sunset",
       "stops": [
-        { "pos": 0.0, "color": "2b0a3d" },
-        { "pos": 0.45, "color": "d1495b" },
-        { "pos": 0.75, "color": "ff9505" },
-        { "pos": 1.0, "color": "ffd60a" }
+        {
+          "pos": 0.0,
+          "color": "2b0a3d"
+        },
+        {
+          "pos": 0.45,
+          "color": "d1495b"
+        },
+        {
+          "pos": 0.75,
+          "color": "ff9505"
+        },
+        {
+          "pos": 1.0,
+          "color": "ffd60a"
+        }
       ]
     }
   },
-
   "active_profile": "default",
-
   "profiles": {
     "default": {
       "label": "Everyday",
       "keys": [
         {
-          "index": 0, "label": "Slack", "color": "4a154b",
-          "on": { "press": { "launch": "Slack" } },
-          "watch": { "type": "slack_unread", "flash": "e01e5a" }
-        },
-        {
-          "index": 1, "label": "Zoom", "color": "2d8cff",
-          "on": { "press": { "launch": "zoom.us" } }
-        },
-        {
-          "index": 2, "label": "WhatsApp", "color": "25d366",
-          "on": { "press": { "launch": "WhatsApp" } },
-          "watch": { "type": "unread_badge", "app": "WhatsApp", "flash": "25d366" }
-        },
-        {
-          "index": 3, "label": "Messages", "color": "34da50",
-          "on": { "press": { "launch": "Messages" } }
-        },
-        {
-          "index": 4, "label": "Chrome Work", "color": "ffcd39",
+          "index": 0,
+          "label": "Slack",
+          "color": "47a2d6",
           "on": {
-            "press": { "shell": "open -na 'Google Chrome' --args --profile-directory='Default'" }
+            "press": {
+              "launch": "Slack"
+            }
+          },
+          "watch": {
+            "type": "slack_unread",
+            "flash": "e01e5a"
           }
         },
         {
-          "index": 5, "label": "Chrome Personal", "color": "4285f4",
+          "index": 1,
+          "label": "Zoom",
+          "color": "5c9ddc",
           "on": {
-            "press": { "shell": "open -na 'Google Chrome' --args --profile-directory='Profile 1'" }
+            "press": {
+              "launch": "zoom.us"
+            }
           }
         },
         {
-          "index": 6, "label": "Media", "color": "00ff88",
-          "on": { "press": { "mode": "media" } }
-        },
-        {
-          "index": 7, "label": "Desk", "color": "ff8800",
-          "on": { "press": { "mode": "desk" } }
-        },
-        {
-          "index": 8, "label": "Screenshot", "color": "8e7dbe",
+          "index": 2,
+          "label": "WhatsApp",
+          "color": "6f98df",
           "on": {
-            "press": { "shortcut": "cmd+shift+4", "flash": "ffffff" },
-            "hold": { "shortcut": "cmd+shift+5" }
+            "press": {
+              "launch": "WhatsApp"
+            }
+          },
+          "watch": {
+            "type": "unread_badge",
+            "app": "WhatsApp",
+            "flash": "25d366"
           }
         },
         {
-          "index": 9, "label": "Do Not Disturb", "color": "c1121f",
+          "index": 3,
+          "label": "Messages",
+          "color": "8193df",
+          "on": {
+            "press": {
+              "launch": "Messages"
+            }
+          }
+        },
+        {
+          "index": 4,
+          "label": "Chrome Work",
+          "color": "c68a41",
+          "on": {
+            "press": {
+              "shell": "open -na 'Google Chrome' --args --profile-directory='Default'"
+            }
+          }
+        },
+        {
+          "index": 5,
+          "label": "Chrome Personal",
+          "color": "bc903a",
+          "on": {
+            "press": {
+              "shell": "open -na 'Google Chrome' --args --profile-directory='Profile 1'"
+            }
+          }
+        },
+        {
+          "index": 6,
+          "label": "Media",
+          "color": "62ac70",
+          "on": {
+            "press": {
+              "mode": "media"
+            }
+          }
+        },
+        {
+          "index": 7,
+          "label": "Desk",
+          "color": "4cae81",
+          "on": {
+            "press": {
+              "mode": "desk"
+            }
+          }
+        },
+        {
+          "index": 8,
+          "label": "Screenshot",
+          "color": "9c8ad8",
+          "on": {
+            "press": {
+              "shortcut": "cmd+shift+4",
+              "flash": "ffffff"
+            },
+            "hold": {
+              "shortcut": "cmd+shift+5"
+            }
+          }
+        },
+        {
+          "index": 9,
+          "label": "Do Not Disturb",
+          "color": "aa85d0",
           "on": {
             "press": {
               "applescript": "tell application \"System Events\" to keystroke \"d\" using {command down, shift down}",
@@ -81,40 +149,71 @@
           }
         },
         {
-          "index": 10, "label": "Deploy", "color": "06d6a0",
+          "index": 10,
+          "label": "Deploy",
+          "color": "d67a7c",
           "on": {
-            "press": { "script": "~/bin/deploy.sh", "flash": "06d6a0" },
-            "double": { "shell": "open https://vercel.com/dashboard" }
+            "press": {
+              "script": "~/bin/deploy.sh",
+              "flash": "06d6a0"
+            },
+            "double": {
+              "shell": "open https://vercel.com/dashboard"
+            }
           }
         },
         {
-          "index": 11, "label": "Sign-off", "color": "457b9d",
-          "on": { "press": { "text": "Thanks!\nBill" } }
+          "index": 11,
+          "label": "Sign-off",
+          "color": "d67c6c",
+          "on": {
+            "press": {
+              "text": "Thanks!\nBill"
+            }
+          }
         },
         {
-          "index": 12, "label": "Next profile", "color": "6c757d",
-          "on": { "press": { "action": "profile_next", "flash": "ffffff" } }
+          "index": 12,
+          "label": "Next profile",
+          "color": "05adb4",
+          "on": {
+            "press": {
+              "action": "profile_next",
+              "flash": "ffffff"
+            }
+          }
         }
       ],
-
       "encoder": {
-        "cw": { "action": "vol_up" },
-        "ccw": { "action": "vol_down" },
-        "press": { "action": "play_pause" }
+        "cw": {
+          "action": "vol_up"
+        },
+        "ccw": {
+          "action": "vol_down"
+        },
+        "press": {
+          "action": "play_pause"
+        }
       },
-
       "rear": {
-        "press": { "action": "reload_config" }
+        "press": {
+          "action": "reload_config"
+        }
       },
-
       "modes": {
         "media": {
           "activate_key": 6,
           "flash": "00ff88",
           "encoder": {
-            "cw": { "action": "vol_up" },
-            "ccw": { "action": "vol_down" },
-            "press": { "action": "play_pause" }
+            "cw": {
+              "action": "vol_up"
+            },
+            "ccw": {
+              "action": "vol_down"
+            },
+            "press": {
+              "action": "play_pause"
+            }
           },
           "timeout_s": 8
         },
@@ -122,14 +221,19 @@
           "activate_key": 7,
           "flash": "ff8800",
           "encoder": {
-            "cw": { "action": "desk_up" },
-            "ccw": { "action": "desk_down" },
-            "press": { "action": "stand_sit" }
+            "cw": {
+              "action": "desk_up"
+            },
+            "ccw": {
+              "action": "desk_down"
+            },
+            "press": {
+              "action": "stand_sit"
+            }
           },
           "timeout_s": 8
         }
       },
-
       "lighting": {
         "effect": {
           "name": "gradient",
@@ -137,33 +241,55 @@
           "target": "underglow",
           "direction": "ring",
           "speed": 0.15
-        }
+        },
+        "underglow": "243954"
       }
     },
-
     "coding": {
       "label": "Claude Code",
       "auto_activate_app": "Terminal",
       "keys": [
         {
-          "index": 0, "label": "Approve", "color": "06d6a0",
-          "on": { "press": { "shortcut": "shift+tab", "flash": "06d6a0" } }
+          "index": 0,
+          "label": "Approve",
+          "color": "06d6a0",
+          "on": {
+            "press": {
+              "shortcut": "shift+tab",
+              "flash": "06d6a0"
+            }
+          }
         },
         {
-          "index": 1, "label": "Deny", "color": "e63946",
-          "on": { "press": { "shortcut": "escape", "flash": "e63946" } }
+          "index": 1,
+          "label": "Deny",
+          "color": "e63946",
+          "on": {
+            "press": {
+              "shortcut": "escape",
+              "flash": "e63946"
+            }
+          }
         }
       ],
       "encoder": {
-        "cw": { "action": "bright_up" },
-        "ccw": { "action": "bright_down" }
+        "cw": {
+          "action": "bright_up"
+        },
+        "ccw": {
+          "action": "bright_down"
+        }
       },
       "lighting": {
-        "effect": { "name": "breathe", "palette": "ocean", "target": "underglow", "speed": 0.2 }
+        "effect": {
+          "name": "breathe",
+          "palette": "ocean",
+          "target": "underglow",
+          "speed": 0.2
+        }
       }
     }
   },
-
   "power": {
     "idle_dim_after_s": 120,
     "dim_brightness": 40,
@@ -178,7 +304,6 @@
     "power_button": "rear",
     "power_off_hold_ms": 2000
   },
-
   "webui": {
     "enabled": true,
     "host": "127.0.0.1",
