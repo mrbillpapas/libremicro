@@ -54,7 +54,8 @@ built against that same injected path, which means it will work the moment v2 la
 ## Phase 0 — Foundations ✅ **built**
 
 Host-side skeleton and the config contract everything else is written against.
-Lives in `host/daemon/` — 56 tests, no device required. See its README for what's in each module.
+Lives in `host/daemon/` — 417 tests across the whole daemon now, none needing a device. See its
+README for what's in each module.
 
 - Config **schema v2**: bindings (launch / shortcut / script / mode / built-in), layout geometry,
   palettes, effects, profiles, power settings, export/import bundle shape.
@@ -70,7 +71,7 @@ One finding worth carrying forward: even with frame diffing, a full-pad animated
 30 fps measures 61% of the 115200-baud link. Add the batched `kf`/`uf` frame commands
 (`PROTOCOL.md`) alongside the Phase 2 firmware work rather than after it.
 
-## Phase 1 — Lighting studio: web UI v1 (unblocked)
+## Phase 1 — Lighting studio: web UI v1 ✅ **built**
 
 The first thing a user can actually *use*, and it needs no firmware change.
 
@@ -98,19 +99,18 @@ key gives exactly one `down` and one `up`; and the orientation — top-left shou
 (`MTX_TO_LOGICAL`). Keep [`RECOVERY.md`](RECOVERY.md) open: `firmware/README.md` records a
 boot-loop on an earlier revision, so step one is a real risk rather than a formality.
 
-**This is the gate.** Two steps, in order:
+This was the gate, and both of its prerequisites are now done:
 
-1. **Re-verify the provisional pins** — touch pad, encoder A/B/switch, rear button — against the
-   disassembly. `HARDWARE.md` currently flags these as unconfirmed, including a direct conflict
-   between the rear button and the ext0 wake pin that has to be resolved. The key matrix is
-   already verified and needs no further work.
-2. **Emit input events** on the existing serial link: `key <i> down|up`, `enc cw|ccw`,
-   `enc press|release`, `touch`, `rear` — per the grammar already drafted in
+1. ~~**Re-verify the provisional pins.**~~ ✅ Resolved by static analysis of stock v0.6.1 — see
+   [`PIN-VERIFICATION.md`](PIN-VERIFICATION.md). The headline: touch and rear were *swapped* in
+   the old table, which is the whole reason GPIO 2 appeared to be cited twice. There was no
+   conflict.
+2. ~~**Emit input events**~~ ✅ Implemented, per the grammar in
    [`PROTOCOL.md`](PROTOCOL.md).
 
 **Done when:** every physical input produces exactly one correct event line, with no ghosting from
 matrix scanning and no missed encoder detents during fast rotation, while LED commands continue to
-work on the same connection.
+work on the same connection. — *pending a flash; none of this is confirmed on hardware yet.*
 
 ## Phase 3 — Bindings: launcher, shortcuts, scripts ✅ **built**
 
