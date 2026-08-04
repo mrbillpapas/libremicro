@@ -30,7 +30,7 @@ try:
 except ImportError:  # pragma: no cover - surfaced at startup with a clear message
     serial = None
 
-EVENT_PREFIXES = ("key", "enc", "touch", "rear", "batt")
+EVENT_PREFIXES = ("key", "enc", "touch", "rear", "batt", "joy", "joyraw")
 
 #: Above this many changed pixels in a zone, one batched `kf`/`uf` line costs fewer bytes
 #: than the individual writes it replaces — and far fewer strip refreshes, since the

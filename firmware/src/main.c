@@ -63,6 +63,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -71,6 +72,7 @@
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "driver/gpio_filter.h"
+#include "esp_adc/adc_oneshot.h"
 #include "driver/i2c_master.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
@@ -312,9 +314,63 @@ static const int8_t MTX_TO_LOGICAL[MTX_ROWS * MTX_COLS] = {
 #endif
 
 #define LM_I2C_SDA_GPIO   8       // vendor-attested, agrees with docs/HARDWARE.md
-#define LM_I2C_SCL_GPIO   18      // vendor-attested; docs/HARDWARE.md says 9
-#define LM_I2C_SCL_ALT    9       // the doc's value, tried second if 18 won't ACK
+#define LM_I2C_SCL_GPIO   18      // vendor-attested, and CONFIRMED on hardware (acked)
+// There is deliberately NO fallback to GPIO 9 any more. GPIO 9 is the JOYSTICK X AXIS
+// (ADC1 channel 8 — docs/JOYSTICK.md), and driving it as an I2C clock would be driving an
+// output onto an analog input. The old "SCL = 9" note was a guess, arduino-esp32's default
+// pair with SDA 8, and it was wrong precisely because 9 was already taken. Hardware has
+// since acked on 18, so the fallback had no reason to exist and one good reason not to.
 #define LM_I2C_HZ         100000  // stock's Wire.begin frequency literal
+
+// ---- joystick: analog, two axes on ADC1 (docs/JOYSTICK.md) ------------------
+// X = GPIO 9  = ADC1 channel 8,  Y = GPIO 10 = ADC1 channel 9.
+// Very high confidence on the pins, but the CALIBRATION is not established: stock
+// hard-codes a 2047.5 centre with no calibration data anywhere, which is an assumption
+// rather than a measurement. So this build only READS and reports raw counts — the `joy`
+// command exists precisely so a human can measure the real rest point, travel and axis
+// orientation before any of it gets baked into an event model.
+// Reads only. Nothing is ever driven onto these pins.
+#ifndef LM_ENABLE_JOYSTICK
+#define LM_ENABLE_JOYSTICK 1
+#endif
+#define LM_JOY_ADC_UNIT   ADC_UNIT_1
+#define LM_JOY_CH_X       ADC_CHANNEL_8   // GPIO 9
+#define LM_JOY_CH_Y       ADC_CHANNEL_9   // GPIO 10
+
+// MEASURED on hardware, not inherited from stock. A 90-second capture over the full travel
+// gave a rest point of (1928, 1928) — 120 counts below the 2047.5 stock hard-codes — and a
+// deflection range that reaches both rails but is asymmetric about rest: 1928 counts one way
+// and 2167 the other. Normalising by a single half-scale constant the way stock does would
+// therefore make one direction reach 1.0 well before the other, i.e. pushing left would feel
+// different from pushing right. Scaling each direction by its own measured span fixes that.
+#define LM_JOY_REST_X     1928
+#define LM_JOY_REST_Y     1928
+#define LM_JOY_SPAN_NEG   1928    // rest -> 0
+#define LM_JOY_SPAN_POS   2167    // rest -> 4095
+
+// Engage / release radii on the normalised unit disc. Two different values on purpose:
+// a single threshold makes a stick resting near the edge of it chatter between engaged and
+// released. Stock's effective engage works out at ~0.32 of raw travel.
+#define LM_JOY_ENGAGE     0.34f
+#define LM_JOY_RELEASE    0.26f
+
+// Which raw angle counts as "north" depends on how the pot is oriented on the PCB, which is
+// not knowable from the firmware OR from an unlabelled capture. Rotate in 45-degree steps
+// until pushing away from you reports `n`. Set LM_JOY_SWAP_XY / the invert flags if the axes
+// are transposed or mirrored rather than merely rotated.
+#ifndef LM_JOY_ROTATE_STEPS
+#define LM_JOY_ROTATE_STEPS 0     // each step = 45 degrees, counter-clockwise
+#endif
+#ifndef LM_JOY_INVERT_X
+#define LM_JOY_INVERT_X 0
+#endif
+#ifndef LM_JOY_INVERT_Y
+#define LM_JOY_INVERT_Y 0
+#endif
+#ifndef LM_JOY_SWAP_XY
+#define LM_JOY_SWAP_XY 0
+#endif
+#define LM_JOY_POLL_MS    10      // 100 Hz, matching stock
 
 #define LM_FG_ADDR        0x36    // bank 0: regs 0x00-0xFF (bank 1 = 0x37, unused)
 
@@ -970,6 +1026,130 @@ static void aux_inputs_start(void)
 
 #endif /* LM_ENABLE_AUX */
 
+// ---- joystick: raw ADC read, for calibration ---------------------------------
+#if LM_ENABLE_JOYSTICK
+
+static adc_oneshot_unit_handle_t s_joy_adc = NULL;
+static void joy_task(void *arg);
+
+static void joy_init(void)
+{
+    adc_oneshot_unit_init_cfg_t unit = { .unit_id = LM_JOY_ADC_UNIT };
+    if (adc_oneshot_new_unit(&unit, &s_joy_adc) != ESP_OK) {
+        s_joy_adc = NULL;
+        out_line("# joy adc unit init failed - joystick reads unavailable\n");
+        return;
+    }
+    // 12 dB attenuation gives the full 0-3.3V span, which is what a centre-tapped
+    // potentiometer across the rail needs.
+    adc_oneshot_chan_cfg_t ch = {
+        .atten   = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    if (adc_oneshot_config_channel(s_joy_adc, LM_JOY_CH_X, &ch) != ESP_OK ||
+        adc_oneshot_config_channel(s_joy_adc, LM_JOY_CH_Y, &ch) != ESP_OK) {
+        out_line("# joy adc channel config failed\n");
+        adc_oneshot_del_unit(s_joy_adc);
+        s_joy_adc = NULL;
+        return;
+    }
+    xTaskCreatePinnedToCore(joy_task, "lm_joy", 3072, NULL, 4, NULL, 1);
+}
+
+// The eight sector names, in raw-angle order starting at +X and going counter-clockwise.
+// LM_JOY_ROTATE_STEPS rotates this mapping without touching the maths.
+static const char *const LM_JOY_DIRS[8] = { "e", "ne", "n", "nw", "w", "sw", "s", "se" };
+
+// Normalise one axis to -1..+1 about its MEASURED rest point, scaling each direction by its
+// own span so the unit disc is actually circular.
+static float joy_norm(int raw, int rest)
+{
+    float v = (raw >= rest)
+        ? (float)(raw - rest) / (float)LM_JOY_SPAN_POS
+        : (float)(raw - rest) / (float)LM_JOY_SPAN_NEG;
+    if (v >  1.0f) v =  1.0f;
+    if (v < -1.0f) v = -1.0f;
+    return v;
+}
+
+// Current direction sector (0-7) and radius, or -1 for "inside the deadzone".
+static int joy_sector(float nx, float ny, float *out_r)
+{
+    if (LM_JOY_INVERT_X) nx = -nx;
+    if (LM_JOY_INVERT_Y) ny = -ny;
+    if (LM_JOY_SWAP_XY)  { float t = nx; nx = ny; ny = t; }
+    float r = sqrtf(nx * nx + ny * ny);
+    if (r > 1.0f) r = 1.0f;
+    if (out_r) *out_r = r;
+    if (r <= 0.0001f) return -1;
+    float deg = atan2f(ny, nx) * (180.0f / (float)M_PI);
+    deg += 45.0f * (float)LM_JOY_ROTATE_STEPS;
+    // Sector centres sit ON the axes, so offset by half a sector before flooring.
+    deg += 22.5f;
+    while (deg <   0.0f) deg += 360.0f;
+    while (deg >= 360.0f) deg -= 360.0f;
+    return (int)(deg / 45.0f) & 7;
+}
+
+static void joy_task(void *arg)
+{
+    (void)arg;
+    int engaged = -1;                       // sector currently held, or -1
+    for (;;) {
+        int rx = 0, ry = 0;
+        if (s_joy_adc
+                && adc_oneshot_read(s_joy_adc, LM_JOY_CH_X, &rx) == ESP_OK
+                && adc_oneshot_read(s_joy_adc, LM_JOY_CH_Y, &ry) == ESP_OK) {
+            float r = 0.0f;
+            int sec = joy_sector(joy_norm(rx, LM_JOY_REST_X),
+                                 joy_norm(ry, LM_JOY_REST_Y), &r);
+            if (engaged < 0) {
+                if (sec >= 0 && r >= LM_JOY_ENGAGE) {
+                    engaged = sec;
+                    out_line("joy %s down\n", LM_JOY_DIRS[engaged]);
+                }
+            } else if (r < LM_JOY_RELEASE) {
+                out_line("joy %s up\n", LM_JOY_DIRS[engaged]);
+                engaged = -1;
+            } else if (sec >= 0 && sec != engaged) {
+                // Rolled around the disc without coming back to centre: close the old
+                // direction before opening the new one, so a `down` always has its `up`.
+                out_line("joy %s up\n", LM_JOY_DIRS[engaged]);
+                engaged = sec;
+                out_line("joy %s down\n", LM_JOY_DIRS[engaged]);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(LM_JOY_POLL_MS));
+    }
+}
+
+// `joy` -> one sample. `joy <n>` -> n samples at 20 Hz, for sweeping the travel.
+static void cmd_joy(int samples)
+{
+    if (!s_joy_adc) { out_line("err joy unavailable\n"); return; }
+    if (samples < 1)   samples = 1;
+    if (samples > 400) samples = 400;
+    for (int i = 0; i < samples; i++) {
+        int x = -1, y = -1;
+        if (adc_oneshot_read(s_joy_adc, LM_JOY_CH_X, &x) != ESP_OK ||
+            adc_oneshot_read(s_joy_adc, LM_JOY_CH_Y, &y) != ESP_OK) {
+            out_line("err joy read\n");
+            return;
+        }
+        float r = 0.0f;
+        int sec = joy_sector(joy_norm(x, LM_JOY_REST_X), joy_norm(y, LM_JOY_REST_Y), &r);
+        out_line("joyraw %d %d r=%.2f dir=%s\n", x, y, r,
+                 (sec >= 0 && r >= LM_JOY_ENGAGE) ? LM_JOY_DIRS[sec] : "-");
+        if (samples > 1) vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    out_line("ok joy %d\n", samples);
+}
+
+#else
+static void joy_init(void) {}
+static void cmd_joy(int samples) { (void)samples; out_line("err joy compiled out\n"); }
+#endif
+
 // ---- battery: MAX77972 fuel gauge, read-only --------------------------------
 //
 // See the big evidence block near the top of the file for where every address
@@ -1102,35 +1282,29 @@ static void batt_task(void *arg)
 {
     (void)arg;
 
-    // Try the vendor-attested SCL first, then the value docs/HARDWARE.md gives.
-    // A couple of attempts each, because a boot-time bus glitch should not
-    // permanently write the feature off.
-    const int scl_candidates[2] = { LM_I2C_SCL_GPIO, LM_I2C_SCL_ALT };
+    // A couple of attempts, because a boot-time bus glitch shouldn't permanently write the
+    // feature off. Only ever GPIO 18 — see the note by LM_I2C_SCL_GPIO for why there is no
+    // second candidate.
     for (int attempt = 0; attempt < 2 && !s_batt_live; attempt++) {
-        for (int i = 0; i < 2; i++) {
-            if (batt_try_bus(scl_candidates[i])) {
-                s_batt_scl  = scl_candidates[i];
-                s_batt_live = true;
-                break;
-            }
+        if (batt_try_bus(LM_I2C_SCL_GPIO)) {
+            s_batt_scl  = LM_I2C_SCL_GPIO;
+            s_batt_live = true;
+            break;
         }
-        if (!s_batt_live) vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 
     if (!s_batt_live) {
         // Loud, once. The pad keeps working; `ver` will say batt=unknown.
-        out_line("# batt no ack from 0x%02x on SDA=%d with SCL=%d or %d "
+        out_line("# batt no ack from 0x%02x on SDA=%d SCL=%d "
                  "- battery reporting disabled, everything else unaffected\n",
-                 LM_FG_ADDR, LM_I2C_SDA_GPIO, LM_I2C_SCL_GPIO, LM_I2C_SCL_ALT);
+                 LM_FG_ADDR, LM_I2C_SDA_GPIO, LM_I2C_SCL_GPIO);
         vTaskDelete(NULL);
         return;
     }
 
-    out_line("# batt gauge 0x%02x acked on SDA=%d SCL=%d%s\n",
-             LM_FG_ADDR, LM_I2C_SDA_GPIO, s_batt_scl,
-             (s_batt_scl == LM_I2C_SCL_ALT)
-                 ? " (the docs/HARDWARE.md pin, not the vendor firmware's 18)"
-                 : " (the vendor firmware's pin; docs/HARDWARE.md says 9)");
+    out_line("# batt gauge 0x%02x acked on SDA=%d SCL=%d\n",
+             LM_FG_ADDR, LM_I2C_SDA_GPIO, s_batt_scl);
 
     int  fails = 0;
     bool reported_unknown = false;
@@ -1324,6 +1498,7 @@ static void handle_line(char *line)
     if (!strcmp(tok[0], "dump"))  { dump_regs("live"); out_line("ok dump\n"); return; }
     if (!strcmp(tok[0], "mscan")) { cmd_mscan(); return; }
     if (!strcmp(tok[0], "batt"))  { cmd_batt(); return; }
+    if (!strcmp(tok[0], "joy"))   { cmd_joy(nt >= 2 ? atoi(tok[1]) : 1); return; }
     if (!strcmp(tok[0], "ver")) {
         // Lets the host detect batched-frame support instead of guessing; it falls
         // back to per-pixel `k`/`u` when this is absent or reports frames=0.
@@ -1439,6 +1614,7 @@ void app_main(void)
     //    one that can block on an external device: its very first act is an I2C
     //    probe that may time out. Nothing above it may wait on that.
     batt_start();
+    joy_init();
 
     out_line("ok ready keys=%d under=%d v2 frames=1\n", s_keys?KEY_N:0, s_amb?AMB_N:0);
 

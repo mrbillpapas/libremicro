@@ -537,6 +537,10 @@
           "description": "Revert to the default encoder binding after this long with no encoder activity. Omit to stay until switched.",
           "type": "number",
           "minimum": 1
+        },
+        "joystick": {
+          "description": "Per-direction overrides that apply only while this mode is active.",
+          "$ref": "#/$defs/joystick"
         }
       }
     },
@@ -599,6 +603,9 @@
         },
         "lighting": {
           "$ref": "#/$defs/lighting"
+        },
+        "joystick": {
+          "$ref": "#/$defs/joystick"
         }
       }
     },
@@ -894,6 +901,37 @@
           "minimum": 1,
           "maximum": 65535,
           "default": 8777
+        }
+      }
+    },
+    "joystick": {
+      "description": "Analog joystick, bound per direction. It's a free 360-degree disc (measured), split into eight 45-degree sectors; the four marks on the faceplate are a convention, not a physical gate. Each direction takes the full set of trigger kinds, so hold and double work exactly as they do for a key. Rolling from one sector to another without returning to centre closes the old direction before opening the new one, so every 'down' gets its 'up'.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "n": {
+          "$ref": "#/$defs/triggers"
+        },
+        "ne": {
+          "$ref": "#/$defs/triggers"
+        },
+        "e": {
+          "$ref": "#/$defs/triggers"
+        },
+        "se": {
+          "$ref": "#/$defs/triggers"
+        },
+        "s": {
+          "$ref": "#/$defs/triggers"
+        },
+        "sw": {
+          "$ref": "#/$defs/triggers"
+        },
+        "w": {
+          "$ref": "#/$defs/triggers"
+        },
+        "nw": {
+          "$ref": "#/$defs/triggers"
         }
       }
     }

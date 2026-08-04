@@ -107,6 +107,17 @@ class Dispatcher:
             return enc.get(kind) if kind in (events.CW, events.CCW, events.PRESS) else None
         if control in (events.TOUCH, events.REAR):
             return (self.profile().get(control) or {}).get(kind)
+        if control == events.JOYSTICK:
+            # Eight independently bindable directions, each with the full set of trigger
+            # kinds. A mode may override them, the same way it overrides keys.
+            name = events.JOY_DIRS[index] if 0 <= index < len(events.JOY_DIRS) else None
+            if name is None:
+                return None
+            if self._mode:
+                mode_joy = (self.modes().get(self._mode) or {}).get("joystick") or {}
+                if name in mode_joy:
+                    return (mode_joy[name] or {}).get(kind)
+            return ((self.profile().get("joystick") or {}).get(name) or {}).get(kind)
         return None
 
     def is_bound(self, control: str, index: int, kind: str) -> bool:

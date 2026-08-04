@@ -28,6 +28,12 @@ KEY = "key"
 ENCODER = "encoder"
 TOUCH = "touch"
 REAR = "rear"
+JOYSTICK = "joystick"
+
+#: Joystick directions, in the order the firmware names them. The index of a direction here
+#: is its `Trigger.index`, so each of the eight directions binds independently — the same
+#: shape as a key, which means press/release/hold/double all work on it for free.
+JOY_DIRS = ("e", "ne", "n", "nw", "w", "sw", "s", "se")
 
 PRESS, RELEASE, HOLD, DOUBLE = "press", "release", "hold", "double"
 CW, CCW = "cw", "ccw"
@@ -189,6 +195,15 @@ def parse_device_line(kind: str, args: list[str]) -> tuple[str, ...] | None:
                 return ("down", ENCODER, 0)
             if what == "release":
                 return ("up", ENCODER, 0)
+            return None
+
+        if kind == "joy" and len(args) >= 2:
+            try:
+                idx = JOY_DIRS.index(args[0])
+            except ValueError:
+                return None
+            if args[1] in ("down", "up"):
+                return (args[1], JOYSTICK, idx)
             return None
 
         if kind == "touch":
