@@ -76,9 +76,20 @@ behind `LM_ENABLE_UNVERIFIED_INPUTS` (off by default) until their pins are confi
 | `key <i> down` / `key <i> up` | key `i` (**logical** 0–12, see above) pressed / released |
 | `enc cw` / `enc ccw` | encoder rotated one detent |
 | `enc press` / `enc release` | encoder button |
-| `touch` | touch pad activated |
+| `touch` | touch pad activated (see the limitation below) |
 | `rear` | rear button pressed |
 | `batt <percent> <0\|1>` | battery state of charge and whether it's charging (Phase 8) |
+
+### Known limitation: `hold` can't work for touch or rear
+
+The firmware emits a single bare `touch` / `rear` line on the active edge, so the host sees a
+tap with **no duration** — which means a `hold` binding on either control can never fire. Keys
+are fine; they send a real `down`/`up` pair.
+
+The fix is for the firmware to emit `touch down` / `touch up` and `rear down` / `rear up`.
+`parse_device_line` already accepts both spellings, so this is a firmware-only change with no
+host work. Until then, treat `hold` on touch and rear as dead config — the web UI's binding
+editor says so at the point you'd bind it.
 
 Events and commands share the port, so the daemon both reads events and writes LED commands
 on one serial connection. Lines are prefixed unambiguously (`ok`/`err` for command replies vs.
