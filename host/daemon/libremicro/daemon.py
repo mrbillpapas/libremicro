@@ -16,6 +16,7 @@ import time
 from collections import deque
 
 from .agent_surface import AgentSurface
+from .cheatsheet import CheatSheet
 from .config import Config, ConfigError
 from .dispatch import Dispatcher
 from .renderer import Renderer
@@ -45,6 +46,12 @@ class Daemon:
         # here touches the input or render path. `self.watchers.state()` is the read-only
         # view of why a key is or isn't pulsing.
         self.watchers = Watchers(self)
+        # The cheat sheet is pure host-side: it needs no device and no firmware, so it works
+        # while the link is parked or the pad is running someone else's firmware entirely.
+        hud = self.cfg.device.get("cheat_sheet") or {}
+        self.cheat_sheet = CheatSheet(self,
+                                     corner=str(hud.get("corner", "bottom-left")),
+                                     timeout_s=float(hud.get("timeout_s", 0) or 0))
 
         webui = self.cfg.webui
         self._serve_ui = webui.get("enabled", True) if serve_ui is None else serve_ui
@@ -92,11 +99,46 @@ class Daemon:
         print("\nshutting down", flush=True)
         self.watchers.stop()
         self.agent.close()
+        self.cheat_sheet.hide()      # never leave a panel pinned over the user's screen
         self.renderer.stop()
         if self._httpd is not None:
             self._httpd.shutdown()
         self.link.clear()
         self.link.close()
+
+    # --- handing the device to another program ------------------------------
+
+    def release_device(self) -> bool:
+        """Blank the pad, drop the serial port, and stop reconnecting.
+
+        This is the whole of what "revert to stock" needs from us. Work Louder's Input app
+        finds a flashable board by listing *serial* ports and matching VID 0x303A with
+        manufacturer "Espressif" (`WLDeviceDiscovery.findWLBootloaderDevices`), which the
+        ESP32-S3's USB-Serial-JTAG console already reports while our firmware is running — so
+        the app sees the pad as a bootloader device with no priming from us. It then flashes
+        through esptool-js, whose `UsbJtagSerialReset` drives the chip into download mode over
+        DTR/RTS in hardware, regardless of what firmware is running.
+
+        So the only thing standing in the app's way is this daemon: it holds
+        /dev/cu.usbmodem* open and re-opens it every two seconds. Hence release, not "prime".
+        """
+        if self.link.parked:
+            return True
+        # Blank first, while we still have the port. Otherwise the last frame stays latched
+        # on the strips for the whole flash — the firmware has no host-disconnect timeout.
+        self.link.clear()
+        port = self.link.port
+        self.link.park()
+        print(f"device: released {port or '(none)'} — the pad is now free for another program "
+              f"(Work Louder Input, esptool). POST /api/reclaim to take it back.", flush=True)
+        return True
+
+    def reclaim_device(self) -> bool:
+        """Undo release_device. False means nothing answered on the port."""
+        ok = self.link.unpark()
+        print(f"device: {'reclaimed on ' + str(self.link.port) if ok else 'reclaim found no device (will retry)'}",
+              flush=True)
+        return ok
 
     # --- config -------------------------------------------------------------
 

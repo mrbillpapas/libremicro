@@ -151,9 +151,11 @@ class Actions:
     def __init__(self, on_profile=None, on_reload=None,
                  volume_step: int = VOLUME_STEP_DEFAULT,
                  volume_mode: str = VOLUME_MODE_DEFAULT,
-                 on_level=None):
+                 on_level=None, on_release=None, on_cheat_sheet=None):
         self._on_profile = on_profile
         self._on_reload = on_reload
+        self._on_release = on_release
+        self._on_cheat_sheet = on_cheat_sheet
         # Called with (fraction 0..1, label) whenever a level changes, so the daemon can show
         # it somewhere. macOS gives no overlay for a programmatic volume set, and a dial with
         # no feedback feels broken — the pad's own underglow is the answer.
@@ -282,6 +284,23 @@ class Actions:
             if self._on_reload is None:
                 return Result(False, "config reload not wired up")
             return Result(bool(self._on_reload()))
+
+        if token in ("cheat_sheet", "cheat_sheet_show", "cheat_sheet_hide"):
+            if self._on_cheat_sheet is None:
+                return Result(False, "cheat sheet not wired up")
+            what = {"cheat_sheet": "toggle", "cheat_sheet_show": "show",
+                    "cheat_sheet_hide": "hide"}[token]
+            # Toggling is the one that wants a key of its own; show/hide exist so `hold` can put
+            # it up and `release` take it down, which is how a peek-while-held binding is built.
+            return Result(bool(self._on_cheat_sheet(what)))
+
+        if token == "release_device":
+            # Deliberately one-way: nothing on the pad can un-release, because the whole
+            # point is that the daemon has stopped touching the port. Reclaim from the web
+            # UI or by restarting the daemon.
+            if self._on_release is None:
+                return Result(False, "device release not wired up")
+            return Result(bool(self._on_release()))
 
         return Result(False, f"unknown action token: {token!r}")
 

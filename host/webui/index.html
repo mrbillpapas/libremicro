@@ -466,6 +466,46 @@
       <ul class="errs" id="cfg-errors" hidden></ul>
       <label class="field"><span>Live config (editable)</span>
         <textarea id="json-view" spellcheck="false" autocomplete="off" rows="22"></textarea></label>
+
+      <h3 class="phead">On-screen cheat sheet</h3>
+      <p class="hint">
+        A translucent panel in the corner of the screen showing what every control is bound to
+        right now — thirteen unlabelled keycaps is the pad's one real ergonomic problem. It is
+        drawn by the native <code>lmhud</code> helper, floats above full-screen apps without
+        taking focus, and re-renders itself whenever the mode or profile changes. Drag it by its
+        background to move it, close it with the × in its corner; where you put it is remembered.
+        Bind <code>cheat_sheet</code> to a key to toggle it from the pad, or
+        <code>cheat_sheet_show</code> on <code>hold</code> plus <code>cheat_sheet_hide</code> on
+        <code>release</code> for a peek-while-held. Needs no device and no firmware.
+      </p>
+      <div class="row">
+        <button id="btn-cheat-toggle" type="button" class="ghost small" title="POST /api/cheatsheet {show:'toggle'}">Toggle cheat sheet</button>
+        <span class="pill" id="cheat-state">—</span>
+      </div>
+      <ul class="errs" id="cheat-errors" hidden></ul>
+
+      <h3 class="phead">Revert to stock firmware</h3>
+      <p class="hint">
+        Work Louder's Input app already recognises this pad as a flashable board — the
+        ESP32-S3's USB-Serial-JTAG console reports Espressif's VID and manufacturer string,
+        which is exactly what the app scans serial ports for, and it drives the chip into
+        download mode itself over DTR/RTS. Nothing has to be primed on the device. The only
+        obstacle is <em>this daemon</em>, which holds the serial port and re-opens it every two
+        seconds.
+      </p>
+      <p class="hint">
+        <strong>Release</strong> blanks the pad, drops the port and stops reconnecting. Then
+        open Input and use <em>“Found device in bootloader mode, click here to reflash”</em>.
+        The flash writes at offset 0 without a full erase, so BLE pairing and the vendor keymap
+        survive. Nothing here is destructive on its own and it is reversible — the LibreMicro
+        image can be re-flashed the same way (<code>docs/RECOVERY.md</code>).
+      </p>
+      <div class="row">
+        <button id="btn-release" type="button" class="ghost small" title="POST /api/release">Release device…</button>
+        <button id="btn-reclaim" type="button" class="ghost small" title="POST /api/reclaim" hidden>Take the device back</button>
+        <span class="pill" id="release-state" hidden>released</span>
+      </div>
+      <ol class="hint" id="release-steps" hidden></ol>
     </div>
   </section>
 </main>

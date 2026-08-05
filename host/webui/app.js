@@ -113,7 +113,7 @@ const bindingType = (k) => BINDING_TYPES.find((t) => t.key === k) || null;
  * native helper as `shortcut` (keys.py MEDIA_ACTIONS — they're NX aux-control events, not
  * keycodes), the rest is daemon-side and works with no helper built. */
 const MEDIA_ACTIONS = ['vol_up', 'vol_down', 'mute', 'play_pause', 'next_track', 'prev_track', 'bright_up', 'bright_down'];
-const NATIVE_ACTIONS = ['desk_up', 'desk_down', 'stand_sit', 'sleep', 'lock', 'profile_next', 'profile_prev', 'reload_config'];
+const NATIVE_ACTIONS = ['desk_up', 'desk_down', 'stand_sit', 'sleep', 'lock', 'profile_next', 'profile_prev', 'reload_config', 'release_device', 'cheat_sheet', 'cheat_sheet_show', 'cheat_sheet_hide'];
 const ACTION_ENUM = MEDIA_ACTIONS.concat(NATIVE_ACTIONS);
 
 /* ---------------------------------------------------------- shortcut grammar */
@@ -545,6 +545,13 @@ const api = {
   getEvents: (since) => req('GET', '/api/events?since=' + (since | 0)),
   setProfile: (profile) => req('POST', '/api/profile', { profile }),
   setMode: (mode) => req('POST', '/api/mode', { mode }),
+  // Hand the pad to another program (Work Louder Input, esptool) and take it back. The daemon
+  // stays up throughout; only the serial port changes hands.
+  release: () => req('POST', '/api/release'),
+  reclaim: () => req('POST', '/api/reclaim'),
+  // The on-screen cheat sheet. Returns the built sheet as well as the visibility, so this page
+  // can show what went on screen even when the lmhud helper isn't built and nothing appeared.
+  cheatSheet: (show) => req('POST', '/api/cheatsheet', { show }),
 };
 
 /* =============================================================== 6. state */
@@ -4707,6 +4714,11 @@ function renderTop() {
   } else if (state.daemonReachable === null) {
     dot.dataset.state = 'unknown';
     label.textContent = 'connecting…';
+  } else if (s.parked) {
+    // Deliberately released, so don't say "no device" — that reads as a fault and invites
+    // exactly the wrong response while another program is mid-flash.
+    dot.dataset.state = 'warn';
+    label.textContent = 'device released (parked)';
   } else if (s.connected) {
     dot.dataset.state = 'on';
     label.textContent = 'device connected';
@@ -4714,6 +4726,8 @@ function renderTop() {
     dot.dataset.state = 'warn';
     label.textContent = 'daemon up, no device';
   }
+  renderRelease();
+  renderCheatSheetState(s.cheat_sheet);
   $('stat-port').textContent = s.port || '—';
   $('stat-profile').textContent = s.active_profile || state.config?.active_profile || '—';
   $('stat-mode').textContent = s.active_mode || 'none';
@@ -4728,6 +4742,36 @@ function renderTop() {
   const stop = $('btn-stop-preview');
   stop.classList.toggle('primary', !!s.previewing);
   stop.title = s.previewing ? 'A preview is driving the pad — revert to the config lighting' : 'Revert the pad to the config lighting';
+}
+
+/* The Config panel's release controls. Driven off `status.parked` rather than off whether the
+ * button was clicked, so the state survives a reload and matches a release fired from the pad. */
+function renderRelease() {
+  const parked = !!state.status.parked;
+  const btn = $('btn-release');
+  if (!btn) return;
+  btn.hidden = parked;
+  $('btn-reclaim').hidden = !parked;
+  $('release-state').hidden = !parked;
+  if (!parked) { $('release-steps').hidden = true; }
+}
+
+function renderCheatSheetState(cs) {
+  const pill = $('cheat-state');
+  if (!pill) return;
+  if (!cs) { pill.textContent = '—'; return; }
+  pill.textContent = !cs.built ? 'helper not built' : (cs.visible ? 'on screen' : 'hidden');
+}
+
+function showReleaseSteps(steps) {
+  const ol = $('release-steps');
+  ol.textContent = '';
+  for (const step of steps || []) {
+    const li = document.createElement('li');
+    li.textContent = step;
+    ol.appendChild(li);
+  }
+  ol.hidden = !ol.children.length;
 }
 
 function renderBanner() {
@@ -5800,6 +5844,48 @@ function wireEventsPanel() {
 }
 
 function wireConfigPanel() {
+  $('btn-cheat-toggle').addEventListener('click', async () => {
+    const res = await api.cheatSheet('toggle');
+    const errs = $('cheat-errors');
+    errs.textContent = '';
+    errs.hidden = true;
+    if (!res.ok) { toast(res.error || 'cheat sheet failed', 'err'); return; }
+    const d = res.data || {};
+    // `built: false` is the common first-run case and the one worth spelling out: the action
+    // silently does nothing until swiftc has been run, which looks like a broken binding.
+    if (!d.built) {
+      const li = document.createElement('li');
+      li.textContent = d.hint || 'lmhud helper is not built';
+      errs.appendChild(li);
+      errs.hidden = false;
+    }
+    for (const e of d.errors || []) {
+      const li = document.createElement('li');
+      li.textContent = e;
+      errs.appendChild(li);
+      errs.hidden = false;
+    }
+    renderCheatSheetState(d);
+  });
+  $('btn-release').addEventListener('click', async () => {
+    if (!confirm('Release the pad?\n\nLibreMicro blanks it, drops the serial port and stops '
+                 + 'reconnecting, so Work Louder Input can flash stock firmware. Nothing is '
+                 + 'written to the device by this step, and you can take it back here.')) return;
+    const res = await api.release();
+    if (!res.ok) { toast(res.error || 'release failed', 'err'); return; }
+    state.status.parked = true;
+    renderTop();
+    showReleaseSteps(res.data && res.data.next_steps);
+    toast('Device released — open Work Louder Input', 'ok');
+  });
+  $('btn-reclaim').addEventListener('click', async () => {
+    const res = await api.reclaim();
+    if (!res.ok) { toast(res.error || 'reclaim failed', 'err'); return; }
+    state.status.parked = false;
+    renderTop();
+    toast(res.data && res.data.connected ? 'Device back' : 'Reclaimed, but no device answered',
+          res.data && res.data.connected ? 'ok' : 'err');
+  });
   $('btn-export').addEventListener('click', () => { doExport(); });
   $('btn-import').addEventListener('click', () => $('file-import').click());
   $('file-import').addEventListener('change', (ev) => {

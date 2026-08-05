@@ -101,6 +101,8 @@ class Link:
         self.firmware: dict | None = None
         self._ver_asked_at = 0.0
         self._ver_attempts = 0
+        # Parked means "deliberately not holding the port". See park().
+        self.parked = False
 
     # --- connection ---------------------------------------------------------
 
@@ -110,6 +112,11 @@ class Link:
 
     def ensure_connected(self) -> bool:
         """Connect if not already. Rate-limited so a missing device isn't a busy loop."""
+        if self.parked:
+            # Not "no device" — "hands off this device". The distinction matters because
+            # every other failure path here wants a retry two seconds later, and this one
+            # wants no retry at all until something calls unpark().
+            return False
         if self.connected:
             return True
         now = time.monotonic()
@@ -141,6 +148,24 @@ class Link:
         self._ver_attempts = 0
         self._start_reader()
         return True
+
+    def park(self) -> None:
+        """Let go of the serial port and stop reconnecting, without quitting the daemon.
+
+        Nothing else here can hand the device over. `close()` alone is not enough: the render
+        loop calls `ensure_connected` every frame, so the port is back within two seconds —
+        which is precisely wrong when another program needs to open it (Work Louder's Input
+        app to flash stock firmware, or esptool). Parked, writes keep being dropped silently,
+        so the renderer, the web UI and config editing all stay up; only the device is gone.
+        """
+        self.parked = True
+        self.close()
+
+    def unpark(self) -> bool:
+        """Take the device back. Returns whether it reconnected on the spot."""
+        self.parked = False
+        self._retry_after = 0.0
+        return self.ensure_connected()
 
     def close(self) -> None:
         self._stop.set()

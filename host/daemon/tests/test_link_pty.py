@@ -252,6 +252,36 @@ class TestLinkOverPty(unittest.TestCase):
             self.link.send_frame(Frame([parse_hex("00ff00")] * 13))
         self.assertFalse(self.link.connected)
 
+    # --- parking (handing the device to another program) ---------------------
+
+    def test_park_releases_the_port_and_refuses_to_reconnect(self):
+        self.assertTrue(self.link.connected)
+        self.link.park()
+        self.assertFalse(self.link.connected)
+        self.assertTrue(self.link.parked)
+        # The render loop calls ensure_connected every frame. If parking didn't survive that,
+        # the port would be back within one frame and a flashing tool would be locked out.
+        for _ in range(5):
+            self.assertFalse(self.link.ensure_connected())
+        self.assertFalse(self.link.connected)
+
+    def test_parked_writes_are_dropped_not_raised(self):
+        self.link.park()
+        self.assertFalse(self.link.send_frame(Frame([parse_hex("ff0000")] * 13)))
+        self.assertFalse(self.link.send("clear"))
+        self.assertEqual(self.dev.read_lines(0.1), [])
+
+    def test_unpark_takes_the_device_back(self):
+        self.link.park()
+        self.assertTrue(self.link.unpark())
+        self.assertTrue(self.link.connected)
+        self.assertFalse(self.link.parked)
+        # A reconnect must forget the diff baseline, or the first frame after taking the
+        # device back would be a delta against a strip state we no longer know.
+        self.dev.read_lines(0.1)
+        self.link.send_frame(Frame([parse_hex("ff0000")] * 13))
+        self.assertIn("k all ff0000", self.dev.read_lines())
+
     def test_missing_port_is_not_an_error(self):
         link = Link(port="/dev/cu.definitely-not-here")
         try:

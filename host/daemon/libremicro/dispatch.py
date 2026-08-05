@@ -40,6 +40,10 @@ class Dispatcher:
         self._now = time.monotonic()
         self.actions = Actions(on_profile=self.switch_profile,
                                on_reload=self._reload,
+                               # getattr, not a bare attribute: the test fakes stand in for the
+                               # daemon and only implement what they exercise.
+                               on_release=getattr(self.d, "release_device", None),
+                               on_cheat_sheet=self._cheat_sheet,
                                volume_step=int(self.cfg.device.get("volume_step", 3)),
                                # "coarse" everywhere: schema.json and actions.py agree, and this
                                # default silently being "fine" is what cost the macOS slider.
@@ -239,6 +243,7 @@ class Dispatcher:
 
         self.d.renderer.set_mode(name)
         self.d.renderer.flash(trigger.index, flash or spec.get("flash") or "ffffff")
+        self._refresh_cheat_sheet()
         return Result(True, f"mode {name}")
 
     def _exit_mode(self) -> None:
@@ -246,6 +251,14 @@ class Dispatcher:
         self._mode_deadline = None
         self.recognizer.reset()
         self.d.renderer.set_mode(None)
+        self._refresh_cheat_sheet()
+
+    def _refresh_cheat_sheet(self) -> None:
+        """A visible cheat sheet showing the previous mode's bindings is worse than none, so
+        every mode and profile change re-renders it — but only if it's actually up."""
+        sheet = getattr(self.d, "cheat_sheet", None)
+        if sheet is not None:
+            sheet.refresh()
 
     def _bump_mode_deadline(self, now: float) -> None:
         """Encoder activity keeps a timed mode alive — the timeout exists to stop you being
@@ -283,7 +296,16 @@ class Dispatcher:
             self._exit_mode()
         self.d.renderer.set_profile(target)
         print(f"libremicro: profile -> {target}", flush=True)
+        self._refresh_cheat_sheet()
         return Result(True, target)
 
     def _reload(self) -> bool:
         return self.d.reload_config()
+
+    def _cheat_sheet(self, what: str) -> bool:
+        """`toggle` / `show` / `hide`, via the daemon's one CheatSheet. getattr because the test
+        fakes stand in for the daemon and only implement what they exercise."""
+        sheet = getattr(self.d, "cheat_sheet", None)
+        if sheet is None:
+            return False
+        return bool({"toggle": sheet.toggle, "show": sheet.show, "hide": sheet.hide}[what]())

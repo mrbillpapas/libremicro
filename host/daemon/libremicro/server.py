@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from . import cheatsheet
 from . import palettes as palette_mod
 from .config import SCHEMA_PATH, Config, ConfigError, validate
 from .frame import Frame
@@ -72,6 +73,9 @@ class Api:
         d = self.daemon
         return {
             "connected": d.link.connected,
+            # Parked is not the same as disconnected: the device is there, we let go of it on
+            # purpose. Without this the UI would report a missing pad and invite a reflash.
+            "parked": d.link.parked,
             "port": d.link.port,
             "active_profile": d.cfg.active_profile_name,
             "profiles": d.cfg.profile_names,
@@ -87,6 +91,7 @@ class Api:
             "firmware": d.link.firmware,
             "watchers": self._watcher_state(),
             "agent": d.agent.snapshot(),
+            "cheat_sheet": d.cheat_sheet.state(),
         }
 
     def agent_status(self, body: dict) -> dict:
@@ -194,6 +199,51 @@ class Api:
         self.daemon.inject_event(event, args)
         return {"ok": True, "injected": f"{event} {' '.join(args)}".strip()}
 
+    def cheat_sheet(self, body: dict) -> dict:
+        """`{"show": "toggle"|"show"|"hide"}`. Also serves the built sheet back, so the web UI
+        can show exactly what went on screen — and so it's inspectable when the helper isn't
+        built and nothing appears."""
+        what = str(body.get("show", "toggle"))
+        sheet = self.daemon.cheat_sheet
+        fn = {"toggle": sheet.toggle, "show": sheet.show, "hide": sheet.hide}.get(what)
+        if fn is None:
+            return {"ok": False, "errors": [f"unknown cheat sheet action {what!r}"]}
+        ok = fn()
+        out = {"ok": True, "acted": ok, **sheet.state()}
+        try:
+            out["sheet"] = cheatsheet.build(self.daemon.cfg, self.daemon.dispatcher)
+        except Exception as exc:
+            out["errors"] = [f"could not build the sheet: {exc}"]
+        return out
+
+    def release(self, body: dict) -> dict:
+        """Hand the pad to another program — the first half of reverting to stock firmware.
+
+        `next_steps` is served rather than hard-coded in the UI so the instructions can't
+        drift from what the daemon actually did.
+        """
+        port = self.daemon.link.port
+        self.daemon.release_device()
+        return {
+            "ok": True,
+            "parked": True,
+            "port": port,
+            "next_steps": [
+                "Open Work Louder Input. It polls for flashable boards once a second and "
+                "should offer \"Found device in bootloader mode, click here to reflash\".",
+                "Let it flash. It writes the stock image at offset 0 without a full erase, so "
+                "BLE pairing (nvs) and the vendor keymap (fs) survive.",
+                "The pad reboots into stock firmware. LibreMicro will not touch it again "
+                "until you POST /api/reclaim or restart the daemon.",
+            ],
+        }
+
+    def reclaim(self, body: dict) -> dict:
+        ok = self.daemon.reclaim_device()
+        return {"ok": ok, "parked": self.daemon.link.parked,
+                "connected": self.daemon.link.connected, "port": self.daemon.link.port,
+                "errors": [] if ok else ["no device answered on the port"]}
+
     def set_profile(self, body: dict) -> dict:
         target = body.get("profile") or "next"
         result = self.daemon.dispatcher.switch_profile(str(target))
@@ -273,6 +323,9 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/profile": self.api.set_profile,
             "/api/mode": self.api.set_mode,
             "/api/agent/status": self.api.agent_status,
+            "/api/release": self.api.release,
+            "/api/reclaim": self.api.reclaim,
+            "/api/cheatsheet": self.api.cheat_sheet,
         })
 
     def _mutate(self, routes: dict[str, Callable[[dict], Any]]) -> None:
