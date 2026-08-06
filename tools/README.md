@@ -22,3 +22,14 @@ python3 map_image.py                        # segment/VA map of the app image
 python3 disasm.py 0x42000020 0x1000         # disassemble a VA range
 python3 find_l32r.py 0x3c0e8918             # find code loading a literal (e.g. a string VA)
 ```
+
+## Vendor SDK sources (not committed)
+
+`extract_sources.py` recovers the vendor SDK's original TypeScript from the source maps that ship
+inside Work Louder's Input app. Point `LM_INPUT_APP` at the bundle; output lands in
+`extracted-src/` at the repo root, which is git-ignored because that material is vendor IP.
+
+```bash
+LM_INPUT_APP=/Applications/input.app python3 extract_sources.py
+```
+

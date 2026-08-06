@@ -122,6 +122,44 @@ The device has three independent ways back to the ROM bootloader, so a bad app c
 `scripts/enter_bootloader.sh` reboots a **stock**-running device into the ROM bootloader via
 the vendor RPC and prints the serial port.
 
+## ⚠️ Do not flash `firmware_v0.9.0-sdk.1_merged.bin`
+
+If you go looking for stock images you will find one that looks newer and better than v0.6.1.
+**`firmware_v0.9.0-sdk.1_merged.bin` is not for this device.** It comes from Work Louder's
+internal "Experiments" releases and is a **Nomad/XYZ build — MicroPython + LVGL, with no
+`wl_lumiere`** (the CM2's LED engine) in it at all. Flashing it to a Creator Micro 2 would brick
+the pad: it is a full merged image, so it overwrites the bootloader and partition table with a
+layout for different hardware, and the result does not present a vendor RPC to talk back to.
+
+Recovery would then depend entirely on ROM-level access (USB-Serial-JTAG or the BOOT/RESET
+buttons, both listed below) rather than anything the running firmware offers. Survivable, but
+there is no reason to go there.
+
+Match the image to the device: for a Creator Micro 2 you want the **v0.6.x CM2 merged image**
+(sha256 `c0d288d5e709cbd7c3f5e4e11e57e26dd1e07e6d83c513e84a9f19d08039794b` for v0.6.1, the one
+all the analysis in [`REVERSE-ENGINEERING.md`](REVERSE-ENGINEERING.md) was done against).
+
+## What has never been backed up: the `nvs` partition — a live risk
+
+`scripts/dump_flash.sh` does a chunked full-flash backup, and **it has never completed.** It
+fails reproducibly at `0x100000` with `Serial data stream stopped`, so the only regions ever
+captured are the first 1 MB (which does at least include the partition table at `0x8000`) and two
+512 KB chunks. That means:
+
+- **`nvs` (`0x810000`, 128 KB) has no backup at all.** It holds BLE pairing and vendor settings.
+- **`fs` (`0x830000`, 2 MB, littlefs) has no image-level backup.** Its *contents* are readable
+  individually over the stock RPC's `fs.read` / `fs.chksm` — that's how `keymap.json` was
+  verified intact across flash cycles — but that is a file-by-file copy, not a partition image.
+
+Every flashing procedure in this document is app-only (`0x10000`) or a vendor full image that
+leaves `nvs`/`fs` alone precisely *because* they can't be restored if lost. The exposure is real
+but bounded: nothing here writes them, and the worst realistic outcome is re-pairing over BLE and
+re-creating a vendor keymap.
+
+Fixing `dump_flash.sh` (smaller chunks, a lower baud rate, or retrying the failing read rather
+than aborting) would close this properly, and is worth doing before anyone flashes a full image
+from a build tree.
+
 ## Known issue: status-LED build boot-loops
 
 The firmware revision that added the three PWM status LEDs (LEDC on GPIO 35/45/48) boot-loops

@@ -241,3 +241,77 @@ coredump 0xA30000    64K  data
 ```
 
 Flashing only `0x10000` preserves `nvs` and `fs`. See `docs/RECOVERY.md`.
+
+## eFuses — everything ships unlocked
+
+Read off a retail pad with `espefuse summary` (the full dump is kept locally as
+`firmware-vendor/efuse_summary.txt`, git-ignored). The headline is that nothing has to be
+circumvented to run custom firmware:
+
+```
+SECURE_BOOT_EN                    False      <- arbitrary firmware boots
+SPI_BOOT_CRYPT_CNT                Disable    <- flash is plaintext
+DIS_DOWNLOAD_MODE                 False
+DIS_USB_JTAG                      False
+DIS_USB_SERIAL_JTAG               False
+DIS_USB_OTG_DOWNLOAD_MODE         False
+DIS_PAD_JTAG                      False      <- hardware JTAG available
+WR_DIS / RD_DIS                   0          <- nothing locked
+BLOCK_USR_DATA (BLOCK3)  ...(24 zero bytes)... 03 02 00 00 00 00 01 00
+```
+
+Other identity facts from the same dump:
+
+| item | value |
+|---|---|
+| MAC / serial | `10:20:ba:73:4d:c8` / `1020BA734DC8` (esptool and the USB descriptor agree) |
+| Flash | 16 MB, mfr `0x46`, dev `0x4018`, quad, 3.3 V |
+| PSRAM | 8 MB, `PSRAM_VENDOR=AP_3v3`, octal — but see `CONFIG_SPIRAM=n` above |
+| Chip revision | ESP32-S3 (QFN56) rev v0.2 |
+
+**`BLOCK_USR_DATA` bytes 24/25 and 30** (`03 02` … `01`) are very likely the `vendor`/`variant`
+pair that stock's `read_board_info_from_efuse` reads — which matters because the vendor RPC's
+`v.oai.*` registration is variant-gated off exactly that (see
+[`VENDOR-RPC.md`](VENDOR-RPC.md)). LibreMicro never reads or depends on it.
+
+> **Never run `espefuse burn_*` on this device.** Every burn is one-way, and nothing LibreMicro
+> does needs a single fuse changed. The device is already fully open.
+
+## USB identity and the PID family
+
+The pad uses Espressif's vendor ID with Work Louder's own product IDs, all publicly registered
+in `espressif/usb-pids` (`allocated-pids.txt`) and cross-checked against the vendor SDK's
+`DEVICE_REGISTRY`:
+
+| VID:PID | Device |
+|---|---|
+| `0x303A:0x8297` | Creator Micro v2, **wired** (BASE) |
+| `0x303A:0x8298` | Creator Micro v2 **BLE** — this device |
+| `0x303A:0x8360` | "Project 2077" → `DeviceType.CodexMicro` |
+
+Worth knowing that **none of these is the identity you see when LibreMicro is running.** Custom
+firmware uses the ESP32-S3's USB-Serial-JTAG console, whose USB identity is fixed in ROM at
+`0x303A:0x1001`, vendor string `Espressif` — which is exactly why the vendor app still offers to
+reflash a converted pad (see [`RECOVERY.md`](RECOVERY.md)).
+
+## Unidentified: IC1 / IC2 / IC3 beside the LED FFC
+
+Board designators, for anyone with the case open: the key PCB carries `SD1`–`SD13` (per-key
+LEDs) and `UD1`–`UD8` (underglow) plus the `J2` FFC labelled **`LED+`**. The control board
+(silkscreen **`Wireless V0.3`**) carries the WROOM-1 module, `BOOT` and `RESET` buttons, `S1`,
+the MAX77972 charger with `L1` (5R2 inductor), USB-C `J1`, and the battery lead.
+
+Three small ICs — **`IC1`, `IC2`, `IC3`** — sit immediately next to that `J2` LED ribbon
+connector and have **never been identified**. No close-up photograph of their markings exists.
+
+They were for a long time the prime suspect for why custom firmware couldn't light an LED, on
+the theory that they were level shifters or buffers with an `OE` that nothing was asserting.
+**That turned out not to be the cause** — the real answer was the GPIO 36 power rail plus the
+battery-backed pad holds, both documented above. So this is no longer a blocker, just an
+unclosed question.
+
+It still matters in one place: a pin-compatible clone board has to decide whether anything sits
+in the LED data path between the ESP32-S3 and the strips. The clone design currently assumes a
+straight-through connection plus a high-side switch on the rail, which is consistent with
+everything observed but not *proven* against these three parts. See the clone-board notes in
+`docs/OPEN-PCB.md` (kept local, not published). One good macro photo would settle it.
